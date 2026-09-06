@@ -1,0 +1,35 @@
+[Unit]
+Description=c_datum_prime (C) translated from RATUM Prime by iohzrd
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bitcoin
+Group=bitcoin
+WorkingDirectory=/opt/c-datum-prime
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/c-datum-prime/build/c-datum-prime \
+  --listen 0.0.0.0:28915 \
+  --keys /var/lib/c-datum-prime/pool.keys \
+  --tag Blockvase \
+  --min-diff 65536 \
+  --source-listen 0.0.0.0:28916 \
+  --source-url https://github.com/Blockvase/c_datum_prime \
+  --bitcoin-datadir /home/bitcoin/.bitcoin \
+  --block-dir /var/lib/c-datum-prime/blocks \
+  --ledger /var/lib/c-datum-prime/ledger \
+  --stats-listen 0.0.0.0:28917
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/c-datum-prime.log
+StandardError=append:/var/log/c-datum-prime.log
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

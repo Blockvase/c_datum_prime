@@ -1,0 +1,3 @@
+repo=https://github.com/iohzrd/ratum
+commit=698a2368266da502dd984a801f3ea9f36a7f5395
+note=shallow clone used as the translation reference for handshake, framing, and config

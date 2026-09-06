@@ -1,0 +1,16 @@
+/build/
+/data/
+*.o
+*.a
+*.log
+*.pid
+*.keys
+.cache/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+.vscode/
+.idea/
+
+# Vendored RATUM reference must be source only, not a nested clone.
+third_party/ratum/.git/

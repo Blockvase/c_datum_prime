@@ -1,0 +1,21 @@
+c_datum_prime for Blockvase
+Protocol and pool behavior are a C translation of RATUM Prime
+by iohzrd (https://github.com/iohzrd/ratum), AGPL-3.0-or-later.
+
+Copyright (C) iohzrd and RATUM contributors
+Copyright (C) Blockvase contributors (C translation and local changes)
+
+Pinned reference tree: third_party/ratum
+  git: https://github.com/iohzrd/ratum
+  commit: 698a2368266da502dd984a801f3ea9f36a7f5395
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
+
+Network use of a modified version requires an offer of the corresponding
+source (AGPL section 13).
+
+CONVOY DATUM Gateway is separate MIT software and is not part of this
+tree. Do not merge this code into CONVOY DATUM's MIT sources.
