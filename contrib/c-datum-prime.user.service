@@ -5,14 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=dev
-Group=dev
-# Stable symlink: ln -sfn /path/to/c_datum_prime /home/dev/.local/lib/c-datum-prime
+# Stable symlink: ln -sfn /path/to/c_datum_prime %h/.local/lib/c-datum-prime
 # Keys/ledger/blocks are data/ next to the real binary via /proc/self/exe.
 # Do not pass --keys/--ledger/--block-dir.
-WorkingDirectory=/home/dev/.local/lib/c-datum-prime
-Environment=PATH=/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/dev/.local/lib/c-datum-prime/build/c-datum-prime \
+WorkingDirectory=%h/.local/lib/c-datum-prime
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/lib/c-datum-prime/build/c-datum-prime \
   --listen 0.0.0.0:28915 \
   --tag Blockvase \
   --min-diff 65536 \
@@ -25,11 +23,9 @@ RestartSec=10
 TimeoutStopSec=15
 KillMode=mixed
 KillSignal=SIGTERM
-StandardOutput=append:/home/dev/.local/lib/c-datum-prime/data/prime.log
-StandardError=append:/home/dev/.local/lib/c-datum-prime/data/prime.log
-NoNewPrivileges=true
-PrivateTmp=true
+StandardOutput=append:%h/.local/lib/c-datum-prime/data/prime.log
+StandardError=append:%h/.local/lib/c-datum-prime/data/prime.log
 LimitNOFILE=65536
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

@@ -234,7 +234,7 @@ int prime_encode_coinbaser_response(uint64_t value, uint8_t coinbaser_id,
 				    unsigned char **out, size_t *out_len);
 int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_config_opts *opt,
 			const unsigned char *plain, size_t plain_len,
-			unsigned char **wire, size_t *wire_len);
+			unsigned char **wire, size_t *wire_len, const char *peer);
 
 int prime_source_start(const char *listen_addr, const char *public_url);
 

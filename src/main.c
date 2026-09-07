@@ -23,6 +23,32 @@
 
 static volatile sig_atomic_t g_stop = 0;
 
+/* data/ next to the project root (parent of build/), not the cwd or a hardcoded home path. */
+static void tree_data_dir(char *out, size_t out_len)
+{
+	char exe[512];
+	char *slash;
+	ssize_t n;
+
+	n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+	if (n <= 0 || (size_t)n >= sizeof exe - 1) {
+		snprintf(out, out_len, "data");
+		return;
+	}
+	exe[n] = 0;
+	slash = strrchr(exe, '/');
+	if (!slash) {
+		snprintf(out, out_len, "data");
+		return;
+	}
+	*slash = 0;
+	slash = strrchr(exe, '/');
+	if (slash && strcmp(slash, "/build") == 0) {
+		*slash = 0;
+	}
+	snprintf(out, out_len, "%s/data", exe);
+}
+
 static void on_signal(int sig)
 {
 	(void)sig;
@@ -120,6 +146,7 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 	size_t bulk_len = 0, bulk_cap = 0;
 	uint32_t bid = 0, btot = 0, bgot = 0;
 	int counted_client = 0;
+	int logged_first_mining = 0;
 
 	snprintf(peer_s, sizeof peer_s, "%s:%u", inet_ntoa(peer->sin_addr), ntohs(peer->sin_port));
 	prime_conn_mining_init(&mining);
@@ -289,7 +316,8 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 						unsigned char *reply = NULL;
 						size_t reply_len = 0;
 						prime_handle_mining(&session, &mining, opt, bulk,
-								    bulk_len, &reply, &reply_len);
+								    bulk_len, &reply, &reply_len,
+								    peer_s);
 						if (reply) {
 							write_all(fd, reply, reply_len);
 							free(reply);
@@ -303,8 +331,13 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 			} else if (header.proto_cmd == PRIME_CMD_MINING) {
 				unsigned char *reply = NULL;
 				size_t reply_len = 0;
+				if (!logged_first_mining && plain_len) {
+					logged_first_mining = 1;
+					fprintf(stderr, "[%s] first mining frame sub=%02x len=%zu\n",
+						peer_s, plain[0], plain_len);
+				}
 				if (prime_handle_mining(&session, &mining, opt, plain, plain_len,
-							&reply, &reply_len) != 0) {
+							&reply, &reply_len, peer_s) != 0) {
 					fprintf(stderr, "[%s] mining handler failed\n", peer_s);
 				} else if (reply) {
 					if (write_all(fd, reply, reply_len) != 0) {
@@ -375,15 +408,15 @@ static void usage(const char *argv0)
 int main(int argc, char **argv)
 {
 	const char *listen_addr = "127.0.0.1:28915";
-	const char *keys_path = "data/pool.keys";
+	const char *keys_path = NULL;
 	const char *motd = "c_datum_prime (C) AGPL-3.0-or-later. Source: https://github.com/Blockvase/c_datum_prime";
 	const char *tag = "Blockvase";
 	const char *payout_hex = "0014548ba41399d57523d5e14d5082b98859d19dfc99";
 	const char *source_listen = "0.0.0.0:28916";
 	const char *source_url = "http://pool.blockvase.com:28916/";
 	const char *bitcoin_datadir = NULL;
-	const char *block_dir = "data/blocks";
-	const char *ledger_path = "data/ledger";
+	const char *block_dir = NULL;
+	const char *ledger_path = NULL;
 	const char *stats_listen = "0.0.0.0:28917";
 	uint64_t min_diff = 65536;
 	uint64_t prime_id = 1;
@@ -402,6 +435,10 @@ int main(int argc, char **argv)
 	int i;
 	char host[128];
 	char bitcoin_home[512];
+	char data_dir[512];
+	char keys_buf[600];
+	char ledger_buf[600];
+	char blocks_buf[600];
 	uint16_t port = 28915;
 	prime_keypairs pool;
 	char pubkey[129];
@@ -474,6 +511,20 @@ int main(int argc, char **argv)
 
 	if (do_selftest) {
 		return prime_selftest();
+	}
+
+	tree_data_dir(data_dir, sizeof data_dir);
+	if (!keys_path || !keys_path[0]) {
+		snprintf(keys_buf, sizeof keys_buf, "%s/pool.keys", data_dir);
+		keys_path = keys_buf;
+	}
+	if (!ledger_path || !ledger_path[0]) {
+		snprintf(ledger_buf, sizeof ledger_buf, "%s/ledger", data_dir);
+		ledger_path = ledger_buf;
+	}
+	if (!block_dir || !block_dir[0]) {
+		snprintf(blocks_buf, sizeof blocks_buf, "%s/blocks", data_dir);
+		block_dir = blocks_buf;
 	}
 
 	if (!bitcoin_datadir || !bitcoin_datadir[0]) {

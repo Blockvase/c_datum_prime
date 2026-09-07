@@ -53,7 +53,7 @@ static int write_keys(const char *path, const prime_keypairs *k)
 	if (fd >= 0) {
 		(void)fchmod(fd, 0600);
 	}
-	if (fprintf(f, "# c-datum-prime pool secret keys. keep private.\n") < 0)
+	if (fprintf(f, "# c-datum-prime pool secret keys. keep private.\n") < 0
 	    || fprintf(f, "sign_sk=%s\n", sign_hex) < 0
 	    || fprintf(f, "box_sk=%s\n", box_hex) < 0) {
 		fclose(f);

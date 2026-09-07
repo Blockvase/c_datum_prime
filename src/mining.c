@@ -294,7 +294,7 @@ static int encode_share_resp(uint8_t status, uint16_t reason, uint32_t nonce,
 
 static int on_coinbaser(prime_conn_mining *st, const prime_config_opts *opt,
 			const unsigned char *plain, size_t plain_len,
-			unsigned char **payload, size_t *payload_len)
+			unsigned char **payload, size_t *payload_len, const char *peer)
 {
 	uint64_t value;
 	if (plain_len < 1 + 8 + 32 + 1 || plain[0] != PRIME_MINING_COINBASER_REQ) {
@@ -304,7 +304,8 @@ static int on_coinbaser(prime_conn_mining *st, const prime_config_opts *opt,
 	if (plain[1 + 8 + 32] != PRIME_STRUCT_END) {
 		return -1;
 	}
-	fprintf(stderr, "prime: coinbaser request %llu sats\n", (unsigned long long)value);
+	fprintf(stderr, "[%s] coinbaser request %llu sats\n",
+		peer && peer[0] ? peer : "?", (unsigned long long)value);
 	if (opt->bitcoin_datadir && !prime_parent_have(opt->bitcoin_datadir, plain + 9)) {
 		memcpy(st->parent_need, plain + 9, 32);
 		st->parent_job = 0;
@@ -353,8 +354,8 @@ static int on_coinbaser(prime_conn_mining *st, const prime_config_opts *opt,
 							      opt->payout_script_len, payload,
 							      payload_len);
 		}
-		fprintf(stderr, "prime: split %zu miner output(s) of %llu sats\n", kept,
-			(unsigned long long)value);
+		fprintf(stderr, "[%s] split %zu miner output(s) of %llu sats\n",
+			peer && peer[0] ? peer : "?", kept, (unsigned long long)value);
 		return prime_encode_coinbaser_outputs(value, id, amounts, script_ptrs, script_lens,
 						      kept, payload, payload_len);
 	}
@@ -549,7 +550,7 @@ static int stash_or_submit_block(prime_conn_mining *st, const prime_config_opts 
 static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 		    const unsigned char *plain, size_t plain_len,
 		    unsigned char **payload, size_t *payload_len, int *want_txns,
-		    uint8_t *txn_job)
+		    uint8_t *txn_job, const char *peer)
 {
 	size_t i;
 	uint8_t job_id, coinbase_id, flags, target_byte, en_size;
@@ -743,8 +744,9 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	if (st->last_accepted) {
 		memcpy(st->last_hash, result, 32);
 	}
-	fprintf(stderr, "prime: share job=%u user=%.48s diff=%llu %s%s%s reason=%u\n",
-		job_id, (const char *)ua, (unsigned long long)share_diff,
+	fprintf(stderr, "[%s] share job=%u user=%.48s diff=%llu %s%s%s reason=%u\n",
+		peer && peer[0] ? peer : "?", job_id, (const char *)ua,
+		(unsigned long long)share_diff,
 		status == PRIME_SHARE_ACCEPTED ? "accept" : "reject",
 		is_block ? " flagged-block" : "",
 		meets_network ? " NETWORK" : "", (unsigned)reason);
@@ -1023,7 +1025,7 @@ static void send_parent_fetch(prime_session *s, prime_conn_mining *st,
 
 int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_config_opts *opt,
 			const unsigned char *plain, size_t plain_len,
-			unsigned char **wire, size_t *wire_len)
+			unsigned char **wire, size_t *wire_len, const char *peer)
 {
 	unsigned char *payload = NULL;
 	size_t payload_len = 0;
@@ -1035,7 +1037,7 @@ int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_con
 		return 0;
 	}
 	if (plain[0] == PRIME_MINING_COINBASER_REQ) {
-		if (on_coinbaser(st, opt, plain, plain_len, &payload, &payload_len) != 0) {
+		if (on_coinbaser(st, opt, plain, plain_len, &payload, &payload_len, peer) != 0) {
 			return -1;
 		}
 		rc = prime_session_encrypt(s, PRIME_CMD_MINING, payload, payload_len, false, wire, wire_len);
@@ -1049,7 +1051,7 @@ int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_con
 		int want_txns = 0;
 		uint8_t txn_job = 0;
 		if (on_share(st, opt, plain, plain_len, &payload, &payload_len, &want_txns,
-			     &txn_job) != 0) {
+			     &txn_job, peer) != 0) {
 			return -1;
 		}
 		rc = prime_session_encrypt(s, PRIME_CMD_MINING, payload, payload_len, false, wire, wire_len);
@@ -1150,6 +1152,7 @@ int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_con
 	if (plain[0] == PRIME_MINING_VALIDATION) {
 		return on_validation(st, opt, plain, plain_len);
 	}
-	fprintf(stderr, "prime: unhandled mining sub %02x (%zu bytes)\n", plain[0], plain_len);
+	fprintf(stderr, "[%s] unhandled mining sub %02x (%zu bytes)\n",
+		peer && peer[0] ? peer : "?", plain[0], plain_len);
 	return 0;
 }

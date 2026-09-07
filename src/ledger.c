@@ -224,7 +224,6 @@ static void load_shares(prime_pool *p)
 		replay_add(p, s.hash);
 	}
 	fclose(f);
-	trim(p);
 }
 
 static void load_sessions(prime_pool *p)

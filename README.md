@@ -68,6 +68,10 @@ AGPL section 13: corresponding source is this GitHub repo and
 
 systemd unit: `contrib/c-datum-prime.service` (`TimeoutStopSec=15`,
 `KillMode=mixed`; SIGTERM can hang on an open DATUM session).
+This host uses the user unit `contrib/c-datum-prime.user.service`
+(`systemctl --user enable --now c-datum-prime`). The website relay is
+`blockvase-relay` (`systemctl --user`). A system-wide template is
+`contrib/c-datum-prime.service`.
 
 ## Pool Info JSON
 
@@ -93,18 +97,37 @@ After the [mining guide](https://bitcoin-blake2b.org/mining) you already have
 Knots. Then:
 
 ```
-./build/c-datum-prime --keys data/pool.keys
+./build/c-datum-prime
 ```
 
-Keys, ledger, and submitted-block files are created under `data/` relative
-to the working directory. Bitcoin RPC defaults to `$HOME/.bitcoin`. Override
-with `--bitcoin-datadir`, `--ledger`, `--block-dir`, and `--payout-script`.
+Keys, ledger, and submitted-block files default to `data/` next to the
+project root (the parent of `build/`), from `/proc/self/exe`. They do not
+depend on the current working directory or a hardcoded home path. Bitcoin
+RPC defaults to `$HOME/.bitcoin`. Override with `--bitcoin-datadir`,
+`--keys`, `--ledger`, `--block-dir`, and `--payout-script`.
 
 Do not forward 8332, 7152, or 23334. Forward 28915 when this Prime is
 public, and 28916 if remote users should fetch source (AGPL section 13).
 
 Use a distinct process name from `datum_gateway` so Knots
 `blocknotify=killall -USR1 datum_gateway` does not signal Prime.
+
+## systemd
+
+User unit (starts at login, or at boot if linger is on):
+
+```
+mkdir -p ~/.local/lib ~/.config/systemd/user
+ln -sfn /path/to/c_datum_prime ~/.local/lib/c-datum-prime
+cp contrib/c-datum-prime.user.service ~/.config/systemd/user/c-datum-prime.service
+loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now c-datum-prime.service
+```
+
+System unit is `contrib/c-datum-prime.service` (`WantedBy=multi-user.target`).
+If you move the checkout, retarget the symlink. Do not add `--keys`,
+`--ledger`, or `--block-dir` to the unit.
 
 ## Isolation
 
