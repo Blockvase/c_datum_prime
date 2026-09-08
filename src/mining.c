@@ -267,7 +267,7 @@ int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 	size_t i, n;
 	unsigned char *p;
 	uint64_t total = 0;
-	size_t extra = prevhash ? 32 : 0;
+	size_t extra = prevhash ? PRIME_COINBASER_PREVHASH_TRAILER_LEN : 0;
 
 	*out = NULL;
 	*out_len = 0;
@@ -303,7 +303,8 @@ int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 			o += script_lens[i];
 		}
 		if (prevhash) {
-			memcpy(p + o, prevhash, 32);
+			memcpy(p + o, PRIME_COINBASER_PREVHASH_MAGIC, PRIME_COINBASER_PREVHASH_MAGIC_LEN);
+			memcpy(p + o + PRIME_COINBASER_PREVHASH_MAGIC_LEN, prevhash, 32);
 		}
 	}
 	*out = p;

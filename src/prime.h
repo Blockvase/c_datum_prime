@@ -148,6 +148,12 @@ int prime_selftest(void);
 
 #define PRIME_MINING_COINBASER_REQ 0x10
 #define PRIME_MINING_COINBASER_RESP 0x11
+/* Optional 0x11 trailer after the blob: 4-byte magic then the request
+ * prevhash. Must match DATUM_COINBASER_PREVHASH_MAGIC on the gateway.
+ * Bytes are not all equal so a repeated-byte pad cannot match. */
+#define PRIME_COINBASER_PREVHASH_MAGIC "CBPH"
+#define PRIME_COINBASER_PREVHASH_MAGIC_LEN 4
+#define PRIME_COINBASER_PREVHASH_TRAILER_LEN 36
 #define PRIME_MINING_SUBMIT_POW 0x27
 #define PRIME_MINING_SHARE_RESP 0x8F
 #define PRIME_SHARE_ACCEPTED 0x50

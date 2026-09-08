@@ -653,15 +653,73 @@ static int test_require_split(void)
 	return 0;
 }
 
+/* Jason's 0x11 rule on the gateway view (payload after the 0x11 byte). */
+static int convoy_trailer_has_prevhash(const unsigned char *msg, size_t msg_len,
+				       unsigned char prevhash[32])
+{
+	const unsigned char *data;
+	size_t len;
+	uint32_t x;
+
+	if (!msg || msg_len < 1 || msg[0] != PRIME_MINING_COINBASER_RESP) {
+		return 0;
+	}
+	data = msg + 1;
+	len = msg_len - 1;
+	if (len < 12) {
+		return 0;
+	}
+	x = (uint32_t)data[8] | ((uint32_t)data[9] << 8) | ((uint32_t)data[10] << 16)
+	    | ((uint32_t)data[11] << 24);
+	if (x < 1 || x > len - 12) {
+		return 0;
+	}
+	if (len < 12u + x + PRIME_COINBASER_PREVHASH_TRAILER_LEN
+	    || memcmp(data + 12 + x, PRIME_COINBASER_PREVHASH_MAGIC,
+		      PRIME_COINBASER_PREVHASH_MAGIC_LEN) != 0) {
+		return 0;
+	}
+	if (prevhash) {
+		memcpy(prevhash, data + 12 + x + PRIME_COINBASER_PREVHASH_MAGIC_LEN, 32);
+	}
+	return 1;
+}
+
+static int expect_trailer(const char *what, const unsigned char *msg, size_t msg_len,
+			  int want_has, const unsigned char *want_prev)
+{
+	unsigned char got[32];
+	int has = convoy_trailer_has_prevhash(msg, msg_len, got);
+
+	if (has != want_has) {
+		fprintf(stderr, "selftest: %s has_prevhash=%d want %d\n", what, has, want_has);
+		return -1;
+	}
+	if (want_has && want_prev && memcmp(got, want_prev, 32) != 0) {
+		fprintf(stderr, "selftest: %s prevhash mismatch\n", what);
+		return -1;
+	}
+	return 0;
+}
+
 static int test_coinbaser_prevhash(void)
 {
 	unsigned char script[22] = {0x00, 0x14};
-	unsigned char parent[32];
+	unsigned char parent[32], other[32];
 	unsigned char *out = NULL;
 	size_t out_len = 0;
 	uint32_t blob_len;
+	unsigned char pad[256];
+	size_t i;
 
 	memset(parent, 0x5e, sizeof parent);
+	memset(other, 0xa1, sizeof other);
+	if (PRIME_COINBASER_PREVHASH_MAGIC[0] == PRIME_COINBASER_PREVHASH_MAGIC[1]
+	    && PRIME_COINBASER_PREVHASH_MAGIC[1] == PRIME_COINBASER_PREVHASH_MAGIC[2]
+	    && PRIME_COINBASER_PREVHASH_MAGIC[2] == PRIME_COINBASER_PREVHASH_MAGIC[3]) {
+		fprintf(stderr, "selftest: magic bytes are all equal\n");
+		return -1;
+	}
 	if (prime_encode_coinbaser_response(5000000000ULL, 3, script, sizeof script, NULL, &out,
 					    &out_len) != 0) {
 		fprintf(stderr, "selftest: stock coinbaser encode failed\n");
@@ -672,13 +730,30 @@ static int test_coinbaser_prevhash(void)
 		free(out);
 		return -1;
 	}
+	/* Stock CONVOY / OCEAN: value + blob only. */
+	if (expect_trailer("stock", out, out_len, 0, NULL) != 0) {
+		free(out);
+		return -1;
+	}
+	/* CONVOY if it pads like the gateway (one byte repeated). */
+	{
+		const size_t pads[] = { 31, 32, 100 };
+		for (i = 0; i < sizeof pads / sizeof pads[0]; i++) {
+			memcpy(pad, out, out_len);
+			memset(pad + out_len, 0x7a, pads[i]);
+			if (expect_trailer("pad", pad, out_len + pads[i], 0, NULL) != 0) {
+				free(out);
+				return -1;
+			}
+		}
+	}
 	free(out);
 	if (prime_encode_coinbaser_response(5000000000ULL, 3, script, sizeof script, parent, &out,
 					    &out_len) != 0) {
 		fprintf(stderr, "selftest: prevhash coinbaser encode failed\n");
 		return -1;
 	}
-	if (out_len != 1 + 8 + 4 + 1 + 8 + 1 + 22 + 32) {
+	if (out_len != 1 + 8 + 4 + 1 + 8 + 1 + 22 + PRIME_COINBASER_PREVHASH_TRAILER_LEN) {
 		fprintf(stderr, "selftest: prevhash coinbaser len %zu\n", out_len);
 		free(out);
 		return -1;
@@ -690,8 +765,26 @@ static int test_coinbaser_prevhash(void)
 		free(out);
 		return -1;
 	}
-	if (memcmp(out + out_len - 32, parent, 32) != 0) {
+	if (memcmp(out + out_len - PRIME_COINBASER_PREVHASH_TRAILER_LEN,
+		   PRIME_COINBASER_PREVHASH_MAGIC, PRIME_COINBASER_PREVHASH_MAGIC_LEN) != 0
+	    || memcmp(out + out_len - 32, parent, 32) != 0) {
 		fprintf(stderr, "selftest: prevhash trailer mismatch\n");
+		free(out);
+		return -1;
+	}
+	/* Proposed CONVOY / this Prime: magic + request parent. */
+	if (expect_trailer("magic+parent", out, out_len, 1, parent) != 0) {
+		free(out);
+		return -1;
+	}
+	memcpy(out + out_len - 32, other, 32);
+	if (expect_trailer("magic+other", out, out_len, 1, other) != 0) {
+		free(out);
+		return -1;
+	}
+	memcpy(out + out_len - PRIME_COINBASER_PREVHASH_TRAILER_LEN, "XXXX", 4);
+	memcpy(out + out_len - 32, parent, 32);
+	if (expect_trailer("wrong magic", out, out_len, 0, NULL) != 0) {
 		free(out);
 		return -1;
 	}
