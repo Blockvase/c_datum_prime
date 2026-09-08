@@ -89,6 +89,63 @@ void prime_conn_mining_init(prime_conn_mining *m)
 	m->next_coinbaser_id = 1;
 }
 
+static prime_split_rec *split_slot_for(prime_conn_mining *st, uint8_t id)
+{
+	size_t i, oldest = 0;
+	size_t maxn = sizeof st->splits / sizeof st->splits[0];
+
+	for (i = 0; i < st->nsplits; i++) {
+		if (st->splits[i].id == id) {
+			return &st->splits[i];
+		}
+		if (st->splits[i].sent_at < st->splits[oldest].sent_at) {
+			oldest = i;
+		}
+	}
+	if (st->nsplits < maxn) {
+		return &st->splits[st->nsplits++];
+	}
+	return &st->splits[oldest];
+}
+
+/* RATUM check_split: key off the job's datum_coinbaser_id, not the share's
+ * stratum class. Class 4 after CONVOY #10 is not a coinbaser id. */
+int prime_require_split_rejected(const prime_conn_mining *st, int subsidy_only,
+				 int meets_network, const unsigned char *coinbase,
+				 size_t coinbase_len, time_t now)
+{
+	size_t si, oi;
+	const prime_split_rec *r = NULL;
+	uint8_t id;
+
+	if (subsidy_only || meets_network || !coinbase || !st) {
+		return 0;
+	}
+	id = st->job_coinbaser_id;
+	if (id == 0) {
+		return 0;
+	}
+	for (si = 0; si < st->nsplits; si++) {
+		if (st->splits[si].id == id) {
+			r = &st->splits[si];
+			break;
+		}
+	}
+	if (!r || !r->n) {
+		return 0;
+	}
+	if (now < r->sent_at || (uint64_t)(now - r->sent_at) <= PRIME_SPLIT_GRACE_SECS) {
+		return 0;
+	}
+	for (oi = 0; oi < r->n; oi++) {
+		if (r->script_lens[oi]
+		    && find_bytes(coinbase, coinbase_len, r->scripts[oi], r->script_lens[oi])) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 static void clear_pending_block(prime_conn_mining *m)
 {
 	free(m->pending_coinbase);
@@ -336,8 +393,8 @@ static int on_coinbaser(prime_conn_mining *st, const prime_config_opts *opt,
 					idents[i]);
 			}
 		}
-		if (st->nsplits < sizeof st->splits / sizeof st->splits[0]) {
-			prime_split_rec *r = &st->splits[st->nsplits++];
+		{
+			prime_split_rec *r = split_slot_for(st, id);
 			memset(r, 0, sizeof *r);
 			r->id = id;
 			r->sent_at = time(NULL);
@@ -584,6 +641,7 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	i = 1;
 	job_id = plain[i++];
 	coinbase_id = plain[i++];
+	(void)coinbase_id;
 	flags = plain[i++];
 	target_byte = plain[i++];
 	ntime = rd_u32(plain + i);
@@ -701,41 +759,12 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	if (!reason && opt->pool && !prime_pool_replay_new(opt->pool, result)) {
 		reason = PRIME_REJECT_DUP;
 	}
-	if (!reason && opt->require_split && !subsidy_only && !meets_network && coinbase) {
-		size_t si;
-		int paid = 0;
-		time_t now = time(NULL);
-		for (si = 0; si < st->nsplits; si++) {
-			prime_split_rec *r = &st->splits[si];
-			size_t oi;
-			if (r->id != coinbase_id || !r->n) {
-				continue;
-			}
-			if ((uint64_t)(now - r->sent_at) <= PRIME_SPLIT_GRACE_SECS) {
-				paid = 1;
-				break;
-			}
-			for (oi = 0; oi < r->n; oi++) {
-				if (r->script_lens[oi]
-				&& find_bytes(coinbase, coinbase_len, r->scripts[oi],
-						  r->script_lens[oi])) {
-					paid = 1;
-					break;
-				}
-			}
-		}
-		if (!paid) {
-			for (si = 0; si < st->nsplits; si++) {
-				if (st->splits[si].id == coinbase_id && st->splits[si].n
-				    && (uint64_t)(time(NULL) - st->splits[si].sent_at)
-					       > PRIME_SPLIT_GRACE_SECS) {
-					reason = PRIME_REJECT_NO_SPLIT;
-					if (opt->pool) {
-						prime_pool_replay_forget(opt->pool, result);
-					}
-					break;
-				}
-			}
+	if (!reason && opt->require_split
+	    && prime_require_split_rejected(st, subsidy_only, meets_network, coinbase,
+					    coinbase_len, time(NULL))) {
+		reason = PRIME_REJECT_NO_SPLIT;
+		if (opt->pool) {
+			prime_pool_replay_forget(opt->pool, result);
 		}
 	}
 	status = reason ? PRIME_SHARE_REJECTED : PRIME_SHARE_ACCEPTED;

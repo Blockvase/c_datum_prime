@@ -567,17 +567,39 @@ int prime_pool_record_block(prime_pool *p, uint32_t height, const unsigned char 
 	return 0;
 }
 
+static double work_to_hashrate_hs(uint64_t work)
+{
+	return ((double)work * PRIME_HASHES_PER_DIFF) / (double)PRIME_HASHRATE_WINDOW_SEC;
+}
+
+static uint64_t ident_window_work(const prime_ident_work *snap, size_t n, const char *identity)
+{
+	size_t i;
+	if (!identity) {
+		return 0;
+	}
+	for (i = 0; i < n; i++) {
+		if (strcmp(snap[i].identity, identity) == 0) {
+			return snap[i].work;
+		}
+	}
+	return 0;
+}
+
 int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len)
 {
-	size_t i, n;
+	size_t i, n, si;
 	int w;
 	char *cur;
 	size_t left;
 	prime_ident_work snap[64];
-	uint64_t total, shares, blocks, window;
+	prime_ident_work rate[64];
+	uint64_t total, shares, blocks, window, cutoff, pool_avg = 0;
+	double pool_hs;
 	if (!p || !out || out_len < 32) {
 		return -1;
 	}
+	memset(rate, 0, sizeof rate);
 	pthread_mutex_lock(&p->mu);
 	total = p->total_work;
 	shares = p->nshares;
@@ -585,14 +607,40 @@ int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len)
 	window = p->window;
 	n = p->nidents < 64 ? p->nidents : 64;
 	memcpy(snap, p->idents, n * sizeof snap[0]);
+	memcpy(rate, snap, n * sizeof rate[0]);
+	for (i = 0; i < n; i++) {
+		rate[i].work = 0;
+	}
+	cutoff = (uint64_t)time(NULL);
+	if (cutoff > PRIME_HASHRATE_WINDOW_SEC) {
+		cutoff -= PRIME_HASHRATE_WINDOW_SEC;
+	} else {
+		cutoff = 0;
+	}
+	for (si = 0; si < p->nshares; si++) {
+		const prime_share_row *s = &p->shares[(p->share_head + si) % PRIME_MAX_SHARES];
+		if (s->at < cutoff) {
+			continue;
+		}
+		pool_avg += s->difficulty;
+		for (i = 0; i < n; i++) {
+			if (strcmp(rate[i].identity, s->identity) == 0) {
+				rate[i].work += s->difficulty;
+				break;
+			}
+		}
+	}
 	pthread_mutex_unlock(&p->mu);
 	qsort(snap, n, sizeof snap[0], cmp_ident_desc);
+	pool_hs = work_to_hashrate_hs(pool_avg);
 	cur = out;
 	left = out_len;
 	w = snprintf(cur, left,
-		     "{\"shares\":%llu,\"work\":%llu,\"window\":%llu,\"blocks\":%llu,\"miners\":[",
+		     "{\"shares\":%llu,\"work\":%llu,\"window\":%llu,\"blocks\":%llu,"
+		     "\"hashrate_hs\":%.8g,\"hashrate_window_sec\":%u,\"miners\":[",
 		     (unsigned long long)shares, (unsigned long long)total,
-		     (unsigned long long)window, (unsigned long long)blocks);
+		     (unsigned long long)window, (unsigned long long)blocks, pool_hs,
+		     (unsigned)PRIME_HASHRATE_WINDOW_SEC);
 	if (w < 0 || (size_t)w >= left) {
 		return -1;
 	}
@@ -600,6 +648,9 @@ int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len)
 	left -= (size_t)w;
 	for (i = 0; i < n; i++) {
 		double pct = total ? ((double)snap[i].work * 100.0 / (double)total) : 0.0;
+		uint64_t avg = ident_window_work(rate, n, snap[i].identity);
+		double hs = work_to_hashrate_hs(avg);
+		double hpct = pool_avg ? ((double)avg * 100.0 / (double)pool_avg) : 0.0;
 		w = snprintf(cur, left, "%s{\"id\":\"", i ? "," : "");
 		if (w < 0 || (size_t)w >= left) {
 			break;
@@ -607,8 +658,10 @@ int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len)
 		cur += w;
 		left -= (size_t)w;
 		json_escape_append(&cur, &left, snap[i].identity);
-		w = snprintf(cur, left, "\",\"work\":%llu,\"window_percent\":%.6f}",
-			     (unsigned long long)snap[i].work, pct);
+		w = snprintf(cur, left,
+			     "\",\"work\":%llu,\"window_percent\":%.6f,"
+			     "\"hashrate_hs\":%.8g,\"hash_percent\":%.6f}",
+			     (unsigned long long)snap[i].work, pct, hs, hpct);
 		if (w < 0 || (size_t)w >= left) {
 			break;
 		}
@@ -620,6 +673,30 @@ int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len)
 	}
 	memcpy(cur, "]}", 3);
 	return 0;
+}
+
+double prime_pool_hashrate_hs(prime_pool *p)
+{
+	size_t si;
+	uint64_t cutoff, work = 0;
+	if (!p) {
+		return 0;
+	}
+	pthread_mutex_lock(&p->mu);
+	cutoff = (uint64_t)time(NULL);
+	if (cutoff > PRIME_HASHRATE_WINDOW_SEC) {
+		cutoff -= PRIME_HASHRATE_WINDOW_SEC;
+	} else {
+		cutoff = 0;
+	}
+	for (si = 0; si < p->nshares; si++) {
+		const prime_share_row *s = &p->shares[(p->share_head + si) % PRIME_MAX_SHARES];
+		if (s->at >= cutoff) {
+			work += s->difficulty;
+		}
+	}
+	pthread_mutex_unlock(&p->mu);
+	return work_to_hashrate_hs(work);
 }
 
 uint64_t prime_pool_share_count(const prime_pool *p)

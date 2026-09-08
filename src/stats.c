@@ -186,6 +186,8 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			"\"window\":%llu,"
 			"\"window_progress_percent\":%.6f,"
 			"\"blocks_found\":%llu,"
+			"\"hashrate_hs\":%.8g,"
+			"\"hashrate_window_sec\":%u,"
 			"\"abw_enabled\":%s,"
 			"\"require_split\":%s"
 			"},"
@@ -209,7 +211,9 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			(unsigned long long)g_min_payout, clients,
 			(unsigned long long)g_min_diff, (unsigned long long)shares,
 			(unsigned long long)work, (unsigned long long)window, progress,
-			(unsigned long long)blocks, g_abw_enabled ? "true" : "false",
+			(unsigned long long)blocks, prime_pool_hashrate_hs(g_pool),
+			(unsigned)PRIME_HASHRATE_WINDOW_SEC,
+			g_abw_enabled ? "true" : "false",
 			g_require_split ? "true" : "false", g_window_multiple,
 			(unsigned long long)g_window_floor, (unsigned long long)work,
 			(unsigned long long)window, miners, g_datum_host, (unsigned)g_datum_port,

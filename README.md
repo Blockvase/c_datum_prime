@@ -47,7 +47,9 @@ Aligned with RATUM Prime (`698a236`) on the live path:
    `--fee-bps`, `--min-payout` 546). Identities are `username` up to the
    first `.`. Mainnet P2PKH `1...`, P2SH `3...`, SegWit `bc1q...`, and
    Taproot `bc1p...` become scripts; up to 128 split outputs are served.
-3. `require_split` after a 30s grace (RATUM). `--no-require-split` to turn off.
+3. `require_split` after a 10s grace (RATUM): keyed off the job's
+   coinbaser id, not the share's stratum class. `--no-require-split` to
+   turn off.
 4. Share PoW (header-v2, twelve zero bytes in the coinbase hole), replay
    guard, credit into the ledger.
 5. v3 ABW: 0xA8 notices, key in H1, mask, 0xA5 receipts, 0x8F exact ref,
@@ -59,7 +61,8 @@ Aligned with RATUM Prime (`698a236`) on the live path:
 9. Stats HTTP (default `0.0.0.0:28917`, `/`, `/stats.json`, and `/pool.json`
    for the Blockvase website relay).
 10. One thread per gateway. `--self-test` covers framing, handshake, header
-    vectors, split 75/25 and >8 outputs, Base58Check, bech32, zero xor mask.
+    vectors, split 75/25 and >8 outputs, Base58Check, bech32, zero xor mask,
+    and `require_split` keyed off the job coinbaser id.
 
 AGPL section 13: corresponding source is this GitHub repo and
 `http://pool.blockvase.com:28916/` (also in the MOTD). Forward TCP 28916
@@ -78,8 +81,10 @@ This host uses the user unit `contrib/c-datum-prime.user.service`
 `GET /pool.json` on the stats listener returns public pool metadata for the
 Blockvase Pool tab. It includes `schema_version`, endpoint, source URL,
 pubkey, fee, payout address types, connected DATUM clients, share-window
-progress, blocks found, and miners by window work percent. It intentionally
-does not include RPC credentials, private keys, or local ledger file paths.
+progress, blocks found, a 3-hour hashrate average (`hashrate_hs`, H/s:
+accepted share difficulty × 2^32 / 10800), and miners by window work
+percent plus that same 3-hour hashrate. It intentionally does not include
+RPC credentials, private keys, or local ledger file paths.
 
 ## Build
 

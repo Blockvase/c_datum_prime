@@ -518,6 +518,17 @@ static int test_ledger_address_abw(void)
 		prime_pool_close(p);
 		return -1;
 	}
+	{
+		char sj[2048];
+		if (prime_pool_stats_json(p, sj, sizeof sj) != 0
+		    || !strstr(sj, "\"hashrate_hs\"")
+		    || !strstr(sj, "\"hash_percent\"")
+		    || prime_pool_hashrate_hs(p) <= 0) {
+			fprintf(stderr, "selftest: hashrate stats missing\n");
+			prime_pool_close(p);
+			return -1;
+		}
+	}
 	n = prime_pool_split(p, 1000000, idents, amounts, 4);
 	if (n != 2 || amounts[0] + amounts[1] != 1000000
 	    || strcmp(idents[0], "alice") != 0 || amounts[0] != 750000) {
@@ -590,6 +601,58 @@ static int test_ledger_address_abw(void)
 	return 0;
 }
 
+static int test_require_split(void)
+{
+	prime_conn_mining st;
+	unsigned char paid[] = { 0x00, 0xaa, 0xbb, 0xcc, 0x00 };
+	unsigned char pool_only[] = { 0x00, 0x11, 0x22, 0x00 };
+	const time_t sent = 1000;
+	const time_t late = sent + PRIME_SPLIT_GRACE_SECS + 1;
+
+	prime_conn_mining_init(&st);
+	st.job_coinbaser_id = 2;
+	st.nsplits = 2;
+	/* Decoy: stratum class 4. Keying off that would treat pool_only as paid. */
+	st.splits[0].id = 4;
+	st.splits[0].sent_at = sent;
+	st.splits[0].n = 1;
+	st.splits[0].script_lens[0] = 2;
+	memcpy(st.splits[0].scripts[0], "\x11\x22", 2);
+	st.splits[1].id = 2;
+	st.splits[1].sent_at = sent;
+	st.splits[1].n = 1;
+	st.splits[1].script_lens[0] = 3;
+	memcpy(st.splits[1].scripts[0], "\xaa\xbb\xcc", 3);
+
+	if (!prime_require_split_rejected(&st, 0, 0, pool_only, sizeof pool_only, late)) {
+		fprintf(stderr, "selftest: require_split should refuse unpaid past grace\n");
+		prime_conn_mining_free(&st);
+		return -1;
+	}
+	if (prime_require_split_rejected(&st, 0, 0, paid, sizeof paid, late)
+	    || prime_require_split_rejected(&st, 0, 0, pool_only, sizeof pool_only, sent)
+	    || prime_require_split_rejected(&st, 1, 0, pool_only, sizeof pool_only, late)
+	    || prime_require_split_rejected(&st, 0, 1, pool_only, sizeof pool_only, late)) {
+		fprintf(stderr, "selftest: require_split exemptions failed\n");
+		prime_conn_mining_free(&st);
+		return -1;
+	}
+	st.job_coinbaser_id = 0;
+	if (prime_require_split_rejected(&st, 0, 0, pool_only, sizeof pool_only, late)) {
+		fprintf(stderr, "selftest: require_split id 0 should pass\n");
+		prime_conn_mining_free(&st);
+		return -1;
+	}
+	st.job_coinbaser_id = 5;
+	if (prime_require_split_rejected(&st, 0, 0, pool_only, sizeof pool_only, late)) {
+		fprintf(stderr, "selftest: require_split unknown id should pass\n");
+		prime_conn_mining_free(&st);
+		return -1;
+	}
+	prime_conn_mining_free(&st);
+	return 0;
+}
+
 int prime_selftest(void)
 {
 	if (sodium_init() < 0) {
@@ -601,7 +664,8 @@ int prime_selftest(void)
 	    || test_nk_and_nonces() != 0
 	    || test_handshake_and_config() != 0
 	    || test_targets_and_header_vector() != 0
-	    || test_ledger_address_abw() != 0) {
+	    || test_ledger_address_abw() != 0
+	    || test_require_split() != 0) {
 		fprintf(stderr, "selftest: FAILED\n");
 		return 1;
 	}

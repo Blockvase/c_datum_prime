@@ -228,6 +228,9 @@ typedef struct {
 
 void prime_conn_mining_init(prime_conn_mining *m);
 void prime_conn_mining_free(prime_conn_mining *m);
+int prime_require_split_rejected(const prime_conn_mining *st, int subsidy_only,
+				 int meets_network, const unsigned char *coinbase,
+				 size_t coinbase_len, time_t now);
 
 int prime_encode_coinbaser_response(uint64_t value, uint8_t coinbaser_id,
 				    const unsigned char *script, size_t script_len,
@@ -293,7 +296,7 @@ int prime_header_pow_hash_abw(const unsigned char prev_block[32], const unsigned
 #define PRIME_REJECT_NO_SPLIT 43
 #define PRIME_REJECT_ABW_SLOT 44
 #define PRIME_MAX_COINBASER_OUTPUTS 512
-#define PRIME_SPLIT_GRACE_SECS 30
+#define PRIME_SPLIT_GRACE_SECS 10
 
 typedef struct prime_pool prime_pool;
 
@@ -317,6 +320,9 @@ uint64_t prime_pool_share_count(const prime_pool *p);
 uint64_t prime_pool_total_work(const prime_pool *p);
 uint64_t prime_pool_window(const prime_pool *p);
 uint64_t prime_pool_blocks_found(const prime_pool *p);
+double prime_pool_hashrate_hs(prime_pool *p);
+#define PRIME_HASHRATE_WINDOW_SEC 10800
+#define PRIME_HASHES_PER_DIFF 4294967296.0
 
 int prime_pool_resume_put(prime_pool *p, const unsigned char token[PRIME_RESUME_TOKEN_LEN],
 			  const unsigned char client_pk[32], uint8_t coinbaser_id,
