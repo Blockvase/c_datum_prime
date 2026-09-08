@@ -699,6 +699,73 @@ static int test_coinbaser_prevhash(void)
 	return 0;
 }
 
+static int test_fee_after_first_block(void)
+{
+	prime_pool *p;
+	char idents[4][PRIME_MAX_IDENTITY];
+	uint64_t amounts[4];
+	unsigned char hash[32];
+	size_t n;
+	const char *path = "/tmp/c-datum-prime-selftest-fee-after";
+
+	remove("/tmp/c-datum-prime-selftest-fee-after.shares");
+	remove("/tmp/c-datum-prime-selftest-fee-after.blocks");
+	remove("/tmp/c-datum-prime-selftest-fee-after.owed");
+	p = prime_pool_open(path, 1000000, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: fee-after open failed\n");
+		return -1;
+	}
+	prime_pool_set_fee_after_first_block(p, 21);
+	if (prime_pool_fee_bps(p) != 0 || prime_pool_blocks_found(p) != 0) {
+		fprintf(stderr, "selftest: fee-after should start at 0 bps\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 9, sizeof hash);
+	if (prime_pool_record_share(p, "alice", 100, hash, "") != 0) {
+		fprintf(stderr, "selftest: fee-after record share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	n = prime_pool_split(p, 1000000, idents, amounts, 4);
+	if (n != 1 || amounts[0] != 1000000) {
+		fprintf(stderr, "selftest: fee-after pre-block split n=%zu a0=%llu\n", n,
+			(unsigned long long)(n ? amounts[0] : 0));
+		prime_pool_close(p);
+		return -1;
+	}
+	if (prime_pool_record_block(p, 1, hash, "alice", 1000000, 0) != 0
+	    || prime_pool_fee_bps(p) != 21 || prime_pool_blocks_found(p) != 1) {
+		fprintf(stderr, "selftest: fee-after first block did not flip to 21 bps\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	n = prime_pool_split(p, 1000000, idents, amounts, 4);
+	if (n != 1 || amounts[0] != 997900) {
+		fprintf(stderr, "selftest: fee-after post-block split n=%zu a0=%llu\n", n,
+			(unsigned long long)(n ? amounts[0] : 0));
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	p = prime_pool_open(path, 1000000, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: fee-after reopen failed\n");
+		return -1;
+	}
+	prime_pool_set_fee_after_first_block(p, 21);
+	if (prime_pool_fee_bps(p) != 21 || prime_pool_blocks_found(p) != 1) {
+		fprintf(stderr, "selftest: fee-after reopen lost block/fee (fee=%u blocks=%llu)\n",
+			(unsigned)prime_pool_fee_bps(p),
+			(unsigned long long)prime_pool_blocks_found(p));
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	return 0;
+}
+
 int prime_selftest(void)
 {
 	if (sodium_init() < 0) {
@@ -712,7 +779,8 @@ int prime_selftest(void)
 	    || test_targets_and_header_vector() != 0
 	    || test_ledger_address_abw() != 0
 	    || test_require_split() != 0
-	    || test_coinbaser_prevhash() != 0) {
+	    || test_coinbaser_prevhash() != 0
+	    || test_fee_after_first_block() != 0) {
 		fprintf(stderr, "selftest: FAILED\n");
 		return 1;
 	}

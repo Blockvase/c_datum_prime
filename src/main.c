@@ -396,7 +396,8 @@ static void usage(const char *argv0)
 		"          [--motd TEXT] [--tag TEXT] [--min-diff N] [--payout-script HEX]\n"
 		"          [--prime-id N] [--source-listen HOST:PORT] [--source-url URL]\n"
 		"          [--bitcoin-datadir PATH] [--block-dir PATH] [--ledger PATH]\n"
-		"          [--stats-listen HOST:PORT] [--fee-bps N] [--min-payout N]\n"
+		"          [--stats-listen HOST:PORT] [--fee-bps N] [--fee-after-first-block]\n"
+		"          [--min-payout N]\n"
 		"          [--window N] [--window-floor N] [--abw-disabled] [--abw-reveal-after N]\n"
 		"          [--no-require-split] [--no-bulk]\n"
 		"          [--dump-ledger] [--settle-block HASH|list] [--void-block HASH]\n"
@@ -424,6 +425,7 @@ int main(int argc, char **argv)
 	uint64_t window_floor = 1;
 	double window_multiple = 8.0;
 	uint16_t fee_bps = 0;
+	int fee_after_first = 0;
 	unsigned abw_reveal = 300;
 	int abw_disabled = 0;
 	int require_split = 1;
@@ -480,6 +482,8 @@ int main(int argc, char **argv)
 			stats_listen = argv[++i];
 		} else if (strcmp(argv[i], "--fee-bps") == 0 && i + 1 < argc) {
 			fee_bps = (uint16_t)strtoul(argv[++i], NULL, 10);
+		} else if (strcmp(argv[i], "--fee-after-first-block") == 0) {
+			fee_after_first = 1;
 		} else if (strcmp(argv[i], "--min-payout") == 0 && i + 1 < argc) {
 			min_payout = strtoull(argv[++i], NULL, 10);
 		} else if (strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
@@ -564,6 +568,7 @@ int main(int argc, char **argv)
 	opt.require_split = require_split ? true : false;
 	opt.bulk_framing = bulk_framing ? true : false;
 	opt.fee_bps = fee_bps;
+	opt.fee_after_first_block = fee_after_first ? true : false;
 	opt.min_payout = min_payout;
 	opt.window_multiple = window_multiple;
 	opt.window_floor = window_floor;
@@ -572,10 +577,30 @@ int main(int argc, char **argv)
 	opt.block_dir = block_dir[0] ? block_dir : NULL;
 	opt.ledger_path = ledger_path;
 	opt.stats_listen = stats_listen;
-	opt.pool = prime_pool_open(ledger_path, window_floor, min_payout, fee_bps);
+	opt.pool = prime_pool_open(ledger_path, window_floor, min_payout,
+				   fee_after_first ? 0 : fee_bps);
 	if (!opt.pool) {
 		fprintf(stderr, "could not open ledger %s\n", ledger_path);
 		return 1;
+	}
+	if (fee_after_first) {
+		if (!fee_bps) {
+			fprintf(stderr, "warning: --fee-after-first-block with --fee-bps 0 does nothing\n");
+		}
+		prime_pool_set_fee_after_first_block(opt.pool, fee_bps);
+		if (prime_pool_blocks_found(opt.pool)) {
+			fprintf(stderr,
+				"fee: %u bps (%.2f%%); ledger already has %llu block(s)\n",
+				(unsigned)prime_pool_fee_bps(opt.pool),
+				(double)prime_pool_fee_bps(opt.pool) / 100.0,
+				(unsigned long long)prime_pool_blocks_found(opt.pool));
+		} else {
+			fprintf(stderr, "fee: 0 until first pool block, then %u bps (%.2f%%)\n",
+				(unsigned)fee_bps, (double)fee_bps / 100.0);
+		}
+	} else {
+		fprintf(stderr, "fee: %u bps (%.2f%%)\n", (unsigned)fee_bps,
+			(double)fee_bps / 100.0);
 	}
 	if (dump_ledger) {
 		prime_pool_dump(opt.pool, stdout);

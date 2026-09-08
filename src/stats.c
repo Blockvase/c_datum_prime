@@ -152,6 +152,7 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 	uint64_t work = prime_pool_total_work(g_pool);
 	uint64_t window = prime_pool_window(g_pool);
 	uint64_t blocks = prime_pool_blocks_found(g_pool);
+	uint16_t fee_bps = g_pool ? prime_pool_fee_bps(g_pool) : g_fee_bps;
 	double progress = window ? ((double)work * 100.0 / (double)window) : 0.0;
 	unsigned clients = connected_clients();
 
@@ -205,8 +206,8 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			"\"source\":\"%s\""
 			"}"
 			"}",
-			(unsigned long long)time(NULL), (unsigned)g_fee_bps,
-			(double)g_fee_bps / 100.0, g_datum_host, (unsigned)g_datum_port,
+			(unsigned long long)time(NULL), (unsigned)fee_bps,
+			(double)fee_bps / 100.0, g_datum_host, (unsigned)g_datum_port,
 			g_source_url, g_pubkey, (unsigned)PRIME_MAX_SPLIT_OUTPUTS,
 			(unsigned long long)g_min_payout, clients,
 			(unsigned long long)g_min_diff, (unsigned long long)shares,

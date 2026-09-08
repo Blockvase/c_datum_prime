@@ -47,6 +47,7 @@ struct prime_pool {
 	uint64_t window;
 	uint64_t min_payout;
 	uint16_t fee_bps;
+	uint16_t fee_after_first_bps;
 	uint64_t total_work;
 	uint64_t cumulative_work;
 	size_t nshares;
@@ -322,6 +323,37 @@ static void save_owed(prime_pool *p)
 	fclose(f);
 }
 
+static void load_blocks(prime_pool *p)
+{
+	FILE *f;
+	char path[600], line[512];
+
+	snprintf(path, sizeof path, "%s.blocks", p->path);
+	f = fopen(path, "r");
+	if (!f) {
+		return;
+	}
+	while (fgets(line, sizeof line, f)) {
+		char *s = line;
+		while (*s == ' ' || *s == '\t') {
+			s++;
+		}
+		if (*s == 0 || *s == '\n' || *s == '#') {
+			continue;
+		}
+		p->blocks_found++;
+	}
+	fclose(f);
+}
+
+static void apply_fee_after_first(prime_pool *p)
+{
+	if (!p->fee_after_first_bps) {
+		return;
+	}
+	p->fee_bps = p->blocks_found ? p->fee_after_first_bps : 0;
+}
+
 static void print_owed_row(FILE *out, const prime_pool *p, size_t i)
 {
 	char hex[65];
@@ -355,10 +387,28 @@ prime_pool *prime_pool_open(const char *path, uint64_t window, uint64_t min_payo
 	load_shares(p);
 	load_sessions(p);
 	load_owed(p);
-	fprintf(stderr, "prime: ledger %s shares=%zu work=%llu window=%llu owed=%zu\n",
+	load_blocks(p);
+	apply_fee_after_first(p);
+	fprintf(stderr, "prime: ledger %s shares=%zu work=%llu window=%llu blocks=%llu owed=%zu\n",
 		p->path, p->nshares, (unsigned long long)p->total_work,
-		(unsigned long long)p->window, p->nowed);
+		(unsigned long long)p->window, (unsigned long long)p->blocks_found, p->nowed);
 	return p;
+}
+
+void prime_pool_set_fee_after_first_block(prime_pool *p, uint16_t after_bps)
+{
+	if (!p) {
+		return;
+	}
+	pthread_mutex_lock(&p->mu);
+	p->fee_after_first_bps = after_bps > 100 ? 100 : after_bps;
+	apply_fee_after_first(p);
+	pthread_mutex_unlock(&p->mu);
+}
+
+uint16_t prime_pool_fee_bps(const prime_pool *p)
+{
+	return p ? p->fee_bps : 0;
 }
 
 void prime_pool_close(prime_pool *p)
@@ -554,6 +604,11 @@ int prime_pool_record_block(prime_pool *p, uint32_t height, const unsigned char 
 	memcpy(p->last_block, hash, 32);
 	snprintf(p->last_finder, sizeof p->last_finder, "%s", finder ? finder : "");
 	p->blocks_found++;
+	if (p->fee_after_first_bps && p->blocks_found == 1) {
+		p->fee_bps = p->fee_after_first_bps;
+		fprintf(stderr, "prime: first block found; fee now %u bps (%.2f%%)\n",
+			(unsigned)p->fee_bps, (double)p->fee_bps / 100.0);
+	}
 	pthread_mutex_unlock(&p->mu);
 	snprintf(path, sizeof path, "%s.blocks", p->path);
 	f = fopen(path, "a");

@@ -97,6 +97,7 @@ typedef struct {
 	bool require_split;
 	bool bulk_framing;
 	uint16_t fee_bps;
+	bool fee_after_first_block;
 	uint64_t min_payout;
 	double window_multiple;
 	uint64_t window_floor;
@@ -306,6 +307,8 @@ int prime_address_script(const char *addr, unsigned char *out, size_t *out_len, 
 uint64_t prime_window_for_difficulty(double network_diff, double multiple, uint64_t floor);
 
 prime_pool *prime_pool_open(const char *path, uint64_t window, uint64_t min_payout, uint16_t fee_bps);
+void prime_pool_set_fee_after_first_block(prime_pool *p, uint16_t after_bps);
+uint16_t prime_pool_fee_bps(const prime_pool *p);
 void prime_pool_close(prime_pool *p);
 void prime_pool_set_window(prime_pool *p, uint64_t window);
 int prime_pool_record_share(prime_pool *p, const char *identity, uint64_t difficulty,

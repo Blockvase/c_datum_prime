@@ -44,7 +44,9 @@ Aligned with RATUM Prime (`698a236`) on the live path:
 
 1. Keys, listen, CONVOY DATUM/RATUM hello (v1 and v3), signed 0x99 config.
 2. Coinbaser split from a durable share ledger (RATUM window math, fee
-   `--fee-bps`, `--min-payout` 546). Identities are `username` up to the
+   `--fee-bps`, optional `--fee-after-first-block` to stay at 0% until the
+   first recorded pool block then apply `--fee-bps` permanently, `--min-payout`
+   546). Identities are `username` up to the
    first `.`. Mainnet P2PKH `1...`, P2SH `3...`, SegWit `bc1q...`, and
    Taproot `bc1p...` become scripts; up to 128 split outputs are served.
 3. `require_split` after a 10s grace (RATUM): keyed off the job's
