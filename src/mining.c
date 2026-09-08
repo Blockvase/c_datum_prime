@@ -260,12 +260,14 @@ int prime_submit_block(const prime_config_opts *opt, const unsigned char *block,
 int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 				   const uint64_t *values, const unsigned char *const *scripts,
 				   const size_t *script_lens, size_t nout,
+				   const unsigned char *prevhash,
 				   unsigned char **out, size_t *out_len)
 {
 	size_t blob_len = 1;
 	size_t i, n;
 	unsigned char *p;
 	uint64_t total = 0;
+	size_t extra = prevhash ? 32 : 0;
 
 	*out = NULL;
 	*out_len = 0;
@@ -279,7 +281,7 @@ int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 	if (total > value) {
 		return -1;
 	}
-	n = 1 + 8 + 4 + blob_len;
+	n = 1 + 8 + 4 + blob_len + extra;
 	p = malloc(n);
 	if (!p) {
 		return -1;
@@ -300,6 +302,9 @@ int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 			memcpy(p + o, scripts[i], script_lens[i]);
 			o += script_lens[i];
 		}
+		if (prevhash) {
+			memcpy(p + o, prevhash, 32);
+		}
 	}
 	*out = p;
 	*out_len = n;
@@ -308,10 +313,11 @@ int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 
 int prime_encode_coinbaser_response(uint64_t value, uint8_t coinbaser_id,
 				    const unsigned char *script, size_t script_len,
+				    const unsigned char *prevhash,
 				    unsigned char **out, size_t *out_len)
 {
 	return prime_encode_coinbaser_outputs(value, coinbaser_id, &value, &script, &script_len, 1,
-					      out, out_len);
+					      prevhash, out, out_len);
 }
 
 static int encode_share_resp_abw(uint8_t status, uint16_t reason, uint32_t nonce,
@@ -408,13 +414,13 @@ static int on_coinbaser(prime_conn_mining *st, const prime_config_opts *opt,
 		st->last_coinbaser_id = id;
 		if (!kept) {
 			return prime_encode_coinbaser_response(value, id, opt->payout_script,
-							      opt->payout_script_len, payload,
-							      payload_len);
+							      opt->payout_script_len, plain + 9,
+							      payload, payload_len);
 		}
 		fprintf(stderr, "[%s] split %zu miner output(s) of %llu sats\n",
 			peer && peer[0] ? peer : "?", kept, (unsigned long long)value);
 		return prime_encode_coinbaser_outputs(value, id, amounts, script_ptrs, script_lens,
-						      kept, payload, payload_len);
+						      kept, plain + 9, payload, payload_len);
 	}
 }
 

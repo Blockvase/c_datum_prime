@@ -234,6 +234,7 @@ int prime_require_split_rejected(const prime_conn_mining *st, int subsidy_only,
 
 int prime_encode_coinbaser_response(uint64_t value, uint8_t coinbaser_id,
 				    const unsigned char *script, size_t script_len,
+				    const unsigned char *prevhash,
 				    unsigned char **out, size_t *out_len);
 int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_config_opts *opt,
 			const unsigned char *plain, size_t plain_len,
@@ -347,6 +348,7 @@ int prime_abw_due_reveals(prime_abw *a, unsigned char ***out, size_t **lens, siz
 int prime_encode_coinbaser_outputs(uint64_t value, uint8_t coinbaser_id,
 				   const uint64_t *values, const unsigned char *const *scripts,
 				   const size_t *script_lens, size_t n,
+				   const unsigned char *prevhash,
 				   unsigned char **out, size_t *out_len);
 
 int prime_bulk_ack(uint32_t id, uint32_t next_offset, unsigned char out[12]);

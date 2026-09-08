@@ -653,6 +653,52 @@ static int test_require_split(void)
 	return 0;
 }
 
+static int test_coinbaser_prevhash(void)
+{
+	unsigned char script[22] = {0x00, 0x14};
+	unsigned char parent[32];
+	unsigned char *out = NULL;
+	size_t out_len = 0;
+	uint32_t blob_len;
+
+	memset(parent, 0x5e, sizeof parent);
+	if (prime_encode_coinbaser_response(5000000000ULL, 3, script, sizeof script, NULL, &out,
+					    &out_len) != 0) {
+		fprintf(stderr, "selftest: stock coinbaser encode failed\n");
+		return -1;
+	}
+	if (out_len != 1 + 8 + 4 + 1 + 8 + 1 + 22) {
+		fprintf(stderr, "selftest: stock coinbaser len %zu\n", out_len);
+		free(out);
+		return -1;
+	}
+	free(out);
+	if (prime_encode_coinbaser_response(5000000000ULL, 3, script, sizeof script, parent, &out,
+					    &out_len) != 0) {
+		fprintf(stderr, "selftest: prevhash coinbaser encode failed\n");
+		return -1;
+	}
+	if (out_len != 1 + 8 + 4 + 1 + 8 + 1 + 22 + 32) {
+		fprintf(stderr, "selftest: prevhash coinbaser len %zu\n", out_len);
+		free(out);
+		return -1;
+	}
+	blob_len = (uint32_t)out[9] | ((uint32_t)out[10] << 8) | ((uint32_t)out[11] << 16)
+		   | ((uint32_t)out[12] << 24);
+	if (blob_len != 1 + 8 + 1 + 22) {
+		fprintf(stderr, "selftest: blob_len includes trailer (%u)\n", blob_len);
+		free(out);
+		return -1;
+	}
+	if (memcmp(out + out_len - 32, parent, 32) != 0) {
+		fprintf(stderr, "selftest: prevhash trailer mismatch\n");
+		free(out);
+		return -1;
+	}
+	free(out);
+	return 0;
+}
+
 int prime_selftest(void)
 {
 	if (sodium_init() < 0) {
@@ -665,7 +711,8 @@ int prime_selftest(void)
 	    || test_handshake_and_config() != 0
 	    || test_targets_and_header_vector() != 0
 	    || test_ledger_address_abw() != 0
-	    || test_require_split() != 0) {
+	    || test_require_split() != 0
+	    || test_coinbaser_prevhash() != 0) {
 		fprintf(stderr, "selftest: FAILED\n");
 		return 1;
 	}
