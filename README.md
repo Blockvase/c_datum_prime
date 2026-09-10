@@ -85,8 +85,20 @@ Blockvase Pool tab. It includes `schema_version`, endpoint, source URL,
 pubkey, fee, payout address types, connected DATUM clients, share-window
 progress, blocks found, a 3-hour hashrate average (`hashrate_hs`, H/s:
 accepted share difficulty × 2^32 / 10800), and miners by window work
-percent plus that same 3-hour hashrate. It intentionally does not include
-RPC credentials, private keys, or local ledger file paths.
+percent plus that same 3-hour hashrate. `GET /shares.json` (also `/tides.json`)
+is the ordered share log for that window: `at`, `difficulty`, `id`, `hash`,
+oldest first. Page with `?after=<hash>&limit=500` (limit max 2000). The live
+window is the share file plus the last known target (`ledger.window`). Prime
+does not trim to the startup floor while `getdifficulty` is down. Optional
+`--stratum-listen` is a second DATUM bind for a public Stratum V1 gateway.
+Shares on that bind pay 2.3% (2% to DATUM identities in the window, 0.3%
+to the payout script). DATUM clients keep `--fee-bps` only. Public miners
+connect to `stratum_v1_url` (`stratum+tcp://pool.blockvase.com:3333`), not
+the internal `--stratum-listen` port. Miner rows include `kind` (`datum`,
+`sv1`, or `mixed`) plus `datum_work` / `public_work`.
+`window_percent` is the payout split from window work, not the 3-hour
+hashrate. It intentionally does not include RPC credentials, private keys,
+or local ledger file paths.
 
 ## Build
 

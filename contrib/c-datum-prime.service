@@ -12,6 +12,7 @@ Group=dev
 # Do not pass --keys/--ledger/--block-dir.
 WorkingDirectory=/home/dev/.local/lib/c-datum-prime
 Environment=PATH=/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/home/dev/.local/lib/c-datum-prime/data/sv1-api.env
 ExecStart=/home/dev/.local/lib/c-datum-prime/build/c-datum-prime \
   --listen 0.0.0.0:28915 \
   --tag Blockvase \
@@ -20,6 +21,8 @@ ExecStart=/home/dev/.local/lib/c-datum-prime/build/c-datum-prime \
   --source-listen 0.0.0.0:28916 \
   --source-url http://pool.blockvase.com:28916/ \
   --stats-listen 0.0.0.0:28917 \
+  --stratum-listen 127.0.0.1:28918 \
+  --sv1-api http://127.0.0.1:7153 \
   --fee-bps 21 \
   --fee-after-first-block
 Restart=always

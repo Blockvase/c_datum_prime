@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int expect_hex(const char *what, const unsigned char *bin, size_t len, const char *want)
 {
@@ -505,7 +506,9 @@ static int test_ledger_address_abw(void)
 	memset(h1, 1, sizeof h1);
 	memset(h2, 2, sizeof h2);
 	remove("/tmp/c-datum-prime-selftest-ledger.shares");
+	remove("/tmp/c-datum-prime-selftest-ledger.window");
 	remove("/tmp/c-datum-prime-selftest-ledger-many.shares");
+	remove("/tmp/c-datum-prime-selftest-ledger-many.window");
 	p = prime_pool_open("/tmp/c-datum-prime-selftest-ledger", 1000000, 0, 0);
 	if (!p) {
 		fprintf(stderr, "selftest: ledger open failed\n");
@@ -523,8 +526,26 @@ static int test_ledger_address_abw(void)
 		if (prime_pool_stats_json(p, sj, sizeof sj) != 0
 		    || !strstr(sj, "\"hashrate_hs\"")
 		    || !strstr(sj, "\"hash_percent\"")
+		    || !strstr(sj, "\"kind\":\"datum\"")
+		    || !strstr(sj, "\"public_work\"")
 		    || prime_pool_hashrate_hs(p) <= 0) {
 			fprintf(stderr, "selftest: hashrate stats missing\n");
+			prime_pool_close(p);
+			return -1;
+		}
+	}
+	{
+		char sh[1024], hex[65];
+		if (prime_pool_shares_json(p, sh, sizeof sh, NULL, 1) != 0
+		    || !strstr(sh, "\"hash\"") || !strstr(sh, "\"has_more\":true")) {
+			fprintf(stderr, "selftest: shares json page missing\n");
+			prime_pool_close(p);
+			return -1;
+		}
+		prime_hex_encode(h1, 32, hex, sizeof hex);
+		if (prime_pool_shares_json(p, sh, sizeof sh, h1, 10) != 0
+		    || !strstr(sh, "bob") || strstr(sh, "alice")) {
+			fprintf(stderr, "selftest: shares json after-cursor failed\n");
 			prime_pool_close(p);
 			return -1;
 		}
@@ -802,6 +823,7 @@ static int test_fee_after_first_block(void)
 	const char *path = "/tmp/c-datum-prime-selftest-fee-after";
 
 	remove("/tmp/c-datum-prime-selftest-fee-after.shares");
+	remove("/tmp/c-datum-prime-selftest-fee-after.window");
 	remove("/tmp/c-datum-prime-selftest-fee-after.blocks");
 	remove("/tmp/c-datum-prime-selftest-fee-after.owed");
 	p = prime_pool_open(path, 1000000, 0, 0);
@@ -859,6 +881,229 @@ static int test_fee_after_first_block(void)
 	return 0;
 }
 
+static int test_sv1_rebate_split(void)
+{
+	prime_pool *p;
+	char idents[4][PRIME_MAX_IDENTITY];
+	uint64_t amounts[4];
+	unsigned char h1[32], h2[32];
+	size_t n;
+	uint64_t alice = 0, bob = 0, i;
+	const char *path = "/tmp/c-datum-prime-selftest-sv1";
+
+	remove("/tmp/c-datum-prime-selftest-sv1.shares");
+	remove("/tmp/c-datum-prime-selftest-sv1.window");
+	p = prime_pool_open(path, 1000000, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: sv1 open failed\n");
+		return -1;
+	}
+	memset(h1, 1, sizeof h1);
+	memset(h2, 2, sizeof h2);
+	if (prime_pool_record_share(p, "alice", 75, h1, "") != 0
+	    || prime_pool_record_share(p, "bob", 25, h2, PRIME_SV1_TAG) != 0) {
+		fprintf(stderr, "selftest: sv1 record failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	n = prime_pool_split(p, 1000000, idents, amounts, 4);
+	for (i = 0; i < n; i++) {
+		if (!strcmp(idents[i], "alice")) {
+			alice = amounts[i];
+		}
+		if (!strcmp(idents[i], "bob")) {
+			bob = amounts[i];
+		}
+	}
+	/* public slice 250000: bob keeps 97.7% = 244250; 2% = 5000 to alice; 0.3% leftover */
+	if (n != 2 || alice != 755000 || bob != 244250) {
+		fprintf(stderr, "selftest: sv1 pre-block split n=%zu alice=%llu bob=%llu\n", n,
+			(unsigned long long)alice, (unsigned long long)bob);
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_set_fee_after_first_block(p, 21);
+	if (prime_pool_record_block(p, 1, h1, "alice", 997900, 2100) != 0) {
+		fprintf(stderr, "selftest: sv1 record block failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	alice = bob = 0;
+	n = prime_pool_split(p, 1000000, idents, amounts, 4);
+	for (i = 0; i < n; i++) {
+		if (!strcmp(idents[i], "alice")) {
+			alice = amounts[i];
+		}
+		if (!strcmp(idents[i], "bob")) {
+			bob = amounts[i];
+		}
+	}
+	/* datum slice 750000 minus 21 bps (1575) plus rebate 5000 = 753425 */
+	if (n != 2 || alice != 753425 || bob != 244250) {
+		fprintf(stderr, "selftest: sv1 post-block split n=%zu alice=%llu bob=%llu\n", n,
+			(unsigned long long)alice, (unsigned long long)bob);
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	return 0;
+}
+
+static int test_window_holds_until_difficulty(void)
+{
+	prime_pool *p;
+	const char *path = "/tmp/c-datum-prime-selftest-window-hold";
+	unsigned char h[32];
+	size_t i;
+
+	remove("/tmp/c-datum-prime-selftest-window-hold.shares");
+	remove("/tmp/c-datum-prime-selftest-window-hold.window");
+	p = prime_pool_open(path, 1000000000ull, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: window-hold open failed\n");
+		return -1;
+	}
+	for (i = 0; i < 10; i++) {
+		memset(h, (int)i + 1, sizeof h);
+		if (prime_pool_record_share(p, "alice", 65536, h, "") != 0) {
+			fprintf(stderr, "selftest: window-hold record failed\n");
+			prime_pool_close(p);
+			return -1;
+		}
+	}
+	if (prime_pool_share_count(p) != 10 || prime_pool_total_work(p) != 655360) {
+		fprintf(stderr, "selftest: window-hold seed count=%llu work=%llu\n",
+			(unsigned long long)prime_pool_share_count(p),
+			(unsigned long long)prime_pool_total_work(p));
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+
+	p = prime_pool_open(path, 0, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: window-hold reopen pending failed\n");
+		return -1;
+	}
+	if (prime_pool_share_count(p) != 10) {
+		fprintf(stderr, "selftest: pending open dropped shares to %llu\n",
+			(unsigned long long)prime_pool_share_count(p));
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(h, 99, sizeof h);
+	if (prime_pool_record_share(p, "bob", 65536, h, "") != 0
+	    || prime_pool_share_count(p) != 11) {
+		fprintf(stderr, "selftest: pending share trimmed window to %llu\n",
+			(unsigned long long)prime_pool_share_count(p));
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_set_window(p, 1000000000ull);
+	if (prime_pool_share_count(p) != 11) {
+		fprintf(stderr, "selftest: set_window dropped shares to %llu\n",
+			(unsigned long long)prime_pool_share_count(p));
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+
+	p = prime_pool_open(path, 0, 0, 0);
+	if (!p || prime_pool_share_count(p) != 11
+	    || prime_pool_window(p) != 1000000000ull) {
+		fprintf(stderr, "selftest: saved window reopen count=%llu window=%llu\n",
+			(unsigned long long)(p ? prime_pool_share_count(p) : 0),
+			(unsigned long long)(p ? prime_pool_window(p) : 0));
+		if (p) {
+			prime_pool_close(p);
+		}
+		return -1;
+	}
+	prime_pool_close(p);
+	return 0;
+}
+
+static int test_nethash_cap(void)
+{
+	prime_pool *p;
+	unsigned char h[32];
+	uint64_t total = 0, sv1 = 0, oldest = 0, count = 0;
+	int admit = 1, kick_all = 0, shed = 0;
+	const char *path = "/tmp/c-datum-prime-selftest-nethash";
+
+	remove("/tmp/c-datum-prime-selftest-nethash.shares");
+	remove("/tmp/c-datum-prime-selftest-nethash.window");
+	p = prime_pool_open(path, 1000000, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: nethash open failed\n");
+		return -1;
+	}
+	memset(h, 9, sizeof h);
+	if (prime_pool_record_share(p, "alice", 100, h, "") != 0
+	    || prime_pool_record_share(p, "bob", 50, h, PRIME_SV1_TAG) != 0) {
+		fprintf(stderr, "selftest: nethash record failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	if (prime_pool_work_since(p, 0, &total, &sv1, &oldest, &count) != 0
+	    || total != 150 || sv1 != 50 || count != 2 || !oldest) {
+		fprintf(stderr, "selftest: work_since total=%llu sv1=%llu count=%llu\n",
+			(unsigned long long)total, (unsigned long long)sv1,
+			(unsigned long long)count);
+		prime_pool_close(p);
+		return -1;
+	}
+	if (prime_pool_work_since(p, (uint64_t)time(NULL) + 60, &total, &sv1, &oldest, &count) != 0
+	    || total || sv1 || count) {
+		fprintf(stderr, "selftest: work_since future cutoff leaked work\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	if (prime_work_to_hashrate_hs(1, 1) != PRIME_HASHES_PER_DIFF) {
+		fprintf(stderr, "selftest: work_to_hashrate_hs failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_cap_policy(0.10, 0.10, 1, &admit, &kick_all, &shed);
+	if (!admit || kick_all || shed) {
+		fprintf(stderr, "selftest: cap under 25%% should stay open\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_cap_policy(0.26, 0.10, 1, &admit, &kick_all, &shed);
+	if (admit || kick_all || !shed) {
+		fprintf(stderr, "selftest: cap over 25%% should close and shed SV1\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_cap_policy(0.26, 0.26, 1, &admit, &kick_all, &shed);
+	if (admit || !kick_all || !shed) {
+		fprintf(stderr, "selftest: DATUM-only over cap should kick all SV1\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_cap_policy(0.24, 0.10, 0, &admit, &kick_all, &shed);
+	if (admit || kick_all || !shed) {
+		fprintf(stderr, "selftest: closed above kick-to should keep shedding\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_cap_policy(0.225, 0.10, 0, &admit, &kick_all, &shed);
+	if (admit || kick_all || shed) {
+		fprintf(stderr, "selftest: hysteresis band should stay closed without shed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_cap_policy(0.21, 0.10, 0, &admit, &kick_all, &shed);
+	if (!admit || kick_all || shed) {
+		fprintf(stderr, "selftest: under resume should reopen\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	return 0;
+}
+
 int prime_selftest(void)
 {
 	if (sodium_init() < 0) {
@@ -873,7 +1118,10 @@ int prime_selftest(void)
 	    || test_ledger_address_abw() != 0
 	    || test_require_split() != 0
 	    || test_coinbaser_prevhash() != 0
-	    || test_fee_after_first_block() != 0) {
+	    || test_fee_after_first_block() != 0
+	    || test_sv1_rebate_split() != 0
+	    || test_window_holds_until_difficulty() != 0
+	    || test_nethash_cap() != 0) {
 		fprintf(stderr, "selftest: FAILED\n");
 		return 1;
 	}

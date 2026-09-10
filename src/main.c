@@ -86,6 +86,9 @@ static int read_exact(int fd, unsigned char *buf, size_t n)
 			return -1;
 		}
 		if (r == 0) {
+			/* Do not leave SO_RCVTIMEO's EAGAIN on EOF; the mining
+			 * loop treats that as idle and never drops the client. */
+			errno = ECONNRESET;
 			return -1;
 		}
 		off += (size_t)r;
@@ -127,7 +130,7 @@ static int parse_hex_script(const char *hex, unsigned char *out, size_t *out_len
 }
 
 static void handle_client(int fd, const struct sockaddr_in *peer, const prime_keypairs *pool,
-			  const char *motd, const prime_config_opts *opt)
+			  const char *motd, const prime_config_opts *opt, int public_stratum)
 {
 	unsigned char hdr_bytes[4];
 	unsigned char *payload = NULL;
@@ -150,6 +153,7 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 
 	snprintf(peer_s, sizeof peer_s, "%s:%u", inet_ntoa(peer->sin_addr), ntohs(peer->sin_port));
 	prime_conn_mining_init(&mining);
+	mining.public_stratum = public_stratum ? 1 : 0;
 	prime_ratchet_hello(&hello_rx);
 	if (read_exact(fd, hdr_bytes, 4) != 0) {
 		fprintf(stderr, "[%s] no hello header\n", peer_s);
@@ -177,9 +181,10 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 	}
 	free(payload);
 	payload = NULL;
-	fprintf(stderr, "[%s] hello ok ua=%s nk=%08x generation=%s\n",
+	fprintf(stderr, "[%s] hello ok ua=%s nk=%08x generation=%s%s\n",
 		peer_s, hello.user_agent, hello.nk,
-		hello.generation == PRIME_GEN_V3 ? "v3" : "v1");
+		hello.generation == PRIME_GEN_V3 ? "v3" : "v1",
+		public_stratum ? " stratum-v1" : "");
 
 	if (prime_accept(&hello, pool, motd, &resp, &resp_len, &session) != 0) {
 		fprintf(stderr, "[%s] could not build handshake response\n", peer_s);
@@ -276,7 +281,9 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 		unsigned char *plain = NULL;
 		size_t plain_len = 0;
 		if (read_exact(fd, hdr_bytes, 4) != 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+			/* Timeout only: SO_RCVTIMEO so g_stop can be noticed.
+			 * read_exact already retries EINTR. EOF is ECONNRESET. */
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
 				continue;
 			}
 			fprintf(stderr, "[%s] disconnected\n", peer_s);
@@ -378,15 +385,71 @@ typedef struct {
 	const prime_keypairs *pool;
 	const char *motd;
 	const prime_config_opts *opt;
+	int public_stratum;
 } prime_client_arg;
 
 static void *client_thread(void *arg)
 {
 	prime_client_arg *a = arg;
-	handle_client(a->fd, &a->peer, a->pool, a->motd, a->opt);
+	handle_client(a->fd, &a->peer, a->pool, a->motd, a->opt, a->public_stratum);
 	close(a->fd);
 	free(a);
 	return NULL;
+}
+
+static int listen_inet(const char *host, uint16_t port)
+{
+	int sock, on = 1;
+	struct sockaddr_in addr;
+
+	sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock < 0) {
+		perror("socket");
+		return -1;
+	}
+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+	memset(&addr, 0, sizeof addr);
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+		fprintf(stderr, "listen host must be an IPv4 address (got %s)\n", host);
+		close(sock);
+		return -1;
+	}
+	if (bind(sock, (struct sockaddr *)&addr, sizeof addr) != 0) {
+		perror("bind");
+		close(sock);
+		return -1;
+	}
+	if (listen(sock, 16) != 0) {
+		perror("listen");
+		close(sock);
+		return -1;
+	}
+	return sock;
+}
+
+static void spawn_client(int fd, const struct sockaddr_in *peer, const prime_keypairs *pool,
+			 const char *motd, const prime_config_opts *opt, int public_stratum)
+{
+	pthread_t th;
+	prime_client_arg *arg = malloc(sizeof *arg);
+	if (!arg) {
+		close(fd);
+		return;
+	}
+	arg->fd = fd;
+	arg->peer = *peer;
+	arg->pool = pool;
+	arg->motd = motd;
+	arg->opt = opt;
+	arg->public_stratum = public_stratum;
+	if (pthread_create(&th, NULL, client_thread, arg) != 0) {
+		close(fd);
+		free(arg);
+		return;
+	}
+	pthread_detach(th);
 }
 
 static void usage(const char *argv0)
@@ -396,7 +459,9 @@ static void usage(const char *argv0)
 		"          [--motd TEXT] [--tag TEXT] [--min-diff N] [--payout-script HEX]\n"
 		"          [--prime-id N] [--source-listen HOST:PORT] [--source-url URL]\n"
 		"          [--bitcoin-datadir PATH] [--block-dir PATH] [--ledger PATH]\n"
-		"          [--stats-listen HOST:PORT] [--fee-bps N] [--fee-after-first-block]\n"
+		"          [--stats-listen HOST:PORT] [--stratum-listen HOST:PORT]\n"
+		"          [--sv1-api URL]\n"
+		"          [--fee-bps N] [--fee-after-first-block]\n"
 		"          [--min-payout N]\n"
 		"          [--window N] [--window-floor N] [--abw-disabled] [--abw-reveal-after N]\n"
 		"          [--no-require-split] [--no-bulk]\n"
@@ -419,6 +484,8 @@ int main(int argc, char **argv)
 	const char *block_dir = NULL;
 	const char *ledger_path = NULL;
 	const char *stats_listen = "0.0.0.0:28917";
+	const char *stratum_listen = NULL;
+	const char *sv1_api = "http://127.0.0.1:7153";
 	uint64_t min_diff = 65536;
 	uint64_t prime_id = 1;
 	uint64_t min_payout = 546;
@@ -448,8 +515,7 @@ int main(int argc, char **argv)
 	size_t payout_len = 0;
 	prime_config_opts opt;
 	int sock;
-	struct sockaddr_in addr;
-	int on = 1;
+	int sock_sv1 = -1;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--self-test") == 0) {
@@ -480,6 +546,10 @@ int main(int argc, char **argv)
 			ledger_path = argv[++i];
 		} else if (strcmp(argv[i], "--stats-listen") == 0 && i + 1 < argc) {
 			stats_listen = argv[++i];
+		} else if (strcmp(argv[i], "--stratum-listen") == 0 && i + 1 < argc) {
+			stratum_listen = argv[++i];
+		} else if (strcmp(argv[i], "--sv1-api") == 0 && i + 1 < argc) {
+			sv1_api = argv[++i];
 		} else if (strcmp(argv[i], "--fee-bps") == 0 && i + 1 < argc) {
 			fee_bps = (uint16_t)strtoul(argv[++i], NULL, 10);
 		} else if (strcmp(argv[i], "--fee-after-first-block") == 0) {
@@ -577,7 +647,9 @@ int main(int argc, char **argv)
 	opt.block_dir = block_dir[0] ? block_dir : NULL;
 	opt.ledger_path = ledger_path;
 	opt.stats_listen = stats_listen;
-	opt.pool = prime_pool_open(ledger_path, window_floor, min_payout,
+	opt.stratum_listen = stratum_listen;
+	opt.sv1_api = sv1_api;
+	opt.pool = prime_pool_open(ledger_path, 0, min_payout,
 				   fee_after_first ? 0 : fee_bps);
 	if (!opt.pool) {
 		fprintf(stderr, "could not open ledger %s\n", ledger_path);
@@ -641,6 +713,9 @@ int main(int argc, char **argv)
 	if (bitcoin_datadir && bitcoin_datadir[0]) {
 		prime_tip_start(bitcoin_datadir, opt.pool, window_multiple, window_floor);
 	}
+	if (prime_cap_start(bitcoin_datadir, opt.pool, sv1_api) != 0) {
+		fprintf(stderr, "warning: 120-block SV1 cap thread did not start\n");
+	}
 
 	if (prime_source_start(source_listen, source_url) != 0) {
 		fprintf(stderr, "warning: AGPL source HTTP did not start on %s\n", source_listen);
@@ -655,76 +730,82 @@ int main(int argc, char **argv)
 	signal(SIGTERM, on_signal);
 	signal(SIGPIPE, SIG_IGN);
 
-	sock = socket(AF_INET, SOCK_STREAM, 0);
+	sock = listen_inet(host, port);
 	if (sock < 0) {
-		perror("socket");
-		return 1;
-	}
-	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
-	memset(&addr, 0, sizeof addr);
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-		fprintf(stderr, "listen host must be an IPv4 address (got %s)\n", host);
-		close(sock);
-		return 2;
-	}
-	if (bind(sock, (struct sockaddr *)&addr, sizeof addr) != 0) {
-		perror("bind");
-		close(sock);
-		return 1;
-	}
-	if (listen(sock, 16) != 0) {
-		perror("listen");
-		close(sock);
 		return 1;
 	}
 
 	fprintf(stderr, "c-datum-prime listening on %s:%u\n", host, port);
+	if (stratum_listen && stratum_listen[0]) {
+		char sv_host[128];
+		uint16_t sv_port = 0;
+		if (parse_listen(stratum_listen, sv_host, sizeof sv_host, &sv_port) != 0) {
+			fprintf(stderr, "bad --stratum-listen %s\n", stratum_listen);
+			close(sock);
+			return 1;
+		}
+		sock_sv1 = listen_inet(sv_host, sv_port);
+		if (sock_sv1 < 0) {
+			close(sock);
+			return 1;
+		}
+		fprintf(stderr, "c-datum-prime stratum-v1 DATUM listen %s:%u (2.3%% / 2%% rebate)\n",
+			sv_host, sv_port);
+	}
 	fprintf(stderr, "pool_pubkey=%s\n", pubkey);
 	fprintf(stderr, "keys=%s tag=%s min_diff=%llu prime_id=%llu abw=%s split=%s\n",
 		keys_path, tag, (unsigned long long)min_diff, (unsigned long long)prime_id,
 		abw_disabled ? "off" : "on", require_split ? "require" : "off");
 	fprintf(stderr, "translated from RATUM Prime by iohzrd; AGPL-3.0-or-later\n");
 
-	{
+	while (!g_stop) {
+		fd_set rfds;
 		struct timeval tv;
+		int maxfd = sock;
+		FD_ZERO(&rfds);
+		FD_SET(sock, &rfds);
+		if (sock_sv1 >= 0) {
+			FD_SET(sock_sv1, &rfds);
+			if (sock_sv1 > maxfd) {
+				maxfd = sock_sv1;
+			}
+		}
 		tv.tv_sec = 1;
 		tv.tv_usec = 0;
-		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-	}
-
-	while (!g_stop) {
-		struct sockaddr_in peer;
-		socklen_t plen = sizeof peer;
-		int c = accept(sock, (struct sockaddr *)&peer, &plen);
-		pthread_t th;
-		prime_client_arg *arg;
-		if (c < 0) {
-			if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+		if (select(maxfd + 1, &rfds, NULL, NULL, &tv) < 0) {
+			if (errno == EINTR) {
 				continue;
 			}
-			perror("accept");
+			perror("select");
 			break;
 		}
-		arg = malloc(sizeof *arg);
-		if (!arg) {
-			close(c);
-			continue;
+		if (FD_ISSET(sock, &rfds)) {
+			struct sockaddr_in peer;
+			socklen_t plen = sizeof peer;
+			int c = accept(sock, (struct sockaddr *)&peer, &plen);
+			if (c >= 0) {
+				spawn_client(c, &peer, &pool, motd, &opt, 0);
+			} else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+				perror("accept");
+				break;
+			}
 		}
-		arg->fd = c;
-		arg->peer = peer;
-		arg->pool = &pool;
-		arg->motd = motd;
-		arg->opt = &opt;
-		if (pthread_create(&th, NULL, client_thread, arg) != 0) {
-			close(c);
-			free(arg);
-			continue;
+		if (sock_sv1 >= 0 && FD_ISSET(sock_sv1, &rfds)) {
+			struct sockaddr_in peer;
+			socklen_t plen = sizeof peer;
+			int c = accept(sock_sv1, (struct sockaddr *)&peer, &plen);
+			if (c >= 0) {
+				spawn_client(c, &peer, &pool, motd, &opt, 1);
+			} else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+				perror("accept");
+				break;
+			}
 		}
-		pthread_detach(th);
 	}
 	close(sock);
+	if (sock_sv1 >= 0) {
+		close(sock_sv1);
+	}
 	prime_pool_close(opt.pool);
 	return 0;
 }

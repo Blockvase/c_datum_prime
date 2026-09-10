@@ -106,6 +106,8 @@ typedef struct {
 	const char *block_dir;
 	const char *ledger_path;
 	const char *stats_listen;
+	const char *stratum_listen;
+	const char *sv1_api;
 	struct prime_pool *pool;
 } prime_config_opts;
 
@@ -168,6 +170,11 @@ int prime_selftest(void);
 #define PRIME_ABW_SLOTS 16
 #define PRIME_MAX_IDENTITY 128
 #define PRIME_MAX_SPLIT_OUTPUTS 128
+#define PRIME_SV1_TAG "sv1"
+#define PRIME_SV1_FEE_BPS 230
+#define PRIME_SV1_DATUM_REBATE_BPS 200
+#define PRIME_SV1_OPERATOR_BPS (PRIME_SV1_FEE_BPS - PRIME_SV1_DATUM_REBATE_BPS)
+#define PRIME_SV1_PUBLIC_STRATUM_PORT 3333
 
 typedef struct {
 	int have_key[PRIME_ABW_SLOTS];
@@ -219,6 +226,7 @@ typedef struct {
 	unsigned char last_hash[32];
 	int last_accepted;
 	int last_candidate;
+	int public_stratum;
 	int want_parent;
 	uint8_t parent_job;
 	unsigned char parent_need[32];
@@ -326,13 +334,43 @@ size_t prime_pool_split(prime_pool *p, uint64_t value, char idents[][PRIME_MAX_I
 int prime_pool_record_block(prime_pool *p, uint32_t height, const unsigned char hash[32],
 			    const char *finder, uint64_t paid_split, uint64_t paid_pool);
 int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len);
+int prime_pool_shares_json(prime_pool *p, char *out, size_t out_len,
+			   const unsigned char *after_hash, size_t limit);
 uint64_t prime_pool_share_count(const prime_pool *p);
 uint64_t prime_pool_total_work(const prime_pool *p);
 uint64_t prime_pool_window(const prime_pool *p);
 uint64_t prime_pool_blocks_found(const prime_pool *p);
 double prime_pool_hashrate_hs(prime_pool *p);
+int prime_pool_work_since(prime_pool *p, uint64_t cutoff, uint64_t *total,
+			  uint64_t *sv1, uint64_t *oldest_at, uint64_t *count);
+double prime_work_to_hashrate_hs(uint64_t work, uint64_t seconds);
 #define PRIME_HASHRATE_WINDOW_SEC 10800
 #define PRIME_HASHES_PER_DIFF 4294967296.0
+#define PRIME_NETHASH_BLOCKS 120
+#define PRIME_CAP_FRACTION 0.25
+#define PRIME_CAP_KICK_TO 0.23
+#define PRIME_CAP_RESUME 0.22
+#define PRIME_CAP_INTERVAL_SEC 300
+
+typedef struct {
+	double network_hs;
+	double pool_hs;
+	double datum_hs;
+	double sv1_hs;
+	double pool_fraction;
+	uint64_t lookback_sec;
+	uint64_t oldest_share_at;
+	uint64_t share_count;
+	int sv1_admit;
+	int have_nethash;
+	uint64_t updated_at;
+} prime_nethash_snap;
+
+void prime_cap_policy(double pool_frac, double datum_frac, int admit_now,
+		      int *admit_out, int *kick_all, int *need_shed);
+void prime_nethash_get(prime_nethash_snap *out);
+int prime_nethash_json(char *out, size_t out_len);
+int prime_cap_start(const char *datadir, prime_pool *pool, const char *sv1_api);
 
 int prime_pool_resume_put(prime_pool *p, const unsigned char token[PRIME_RESUME_TOKEN_LEN],
 			  const unsigned char client_pk[32], uint8_t coinbaser_id,
@@ -374,6 +412,8 @@ void prime_stats_client_close(void);
 int prime_rpc_datadir_arg(const char *datadir, char *out, size_t out_len);
 int prime_rpc_call(const char *datadir, const char *rest, char *out, size_t out_len);
 int prime_rpc_difficulty(const char *datadir, double *out);
+int prime_rpc_networkhashps(const char *datadir, unsigned blocks, double *out);
+int prime_rpc_lookback_since(const char *datadir, unsigned blocks, uint64_t *since);
 int prime_parent_have(const char *datadir, const unsigned char prev_hash[32]);
 int prime_submit_raw_block(const char *datadir, const unsigned char *block, size_t block_len);
 int prime_tip_start(const char *datadir, prime_pool *pool, double multiple, uint64_t floor);

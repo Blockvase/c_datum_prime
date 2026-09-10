@@ -401,6 +401,24 @@ static int on_coinbaser(prime_conn_mining *st, const prime_config_opts *opt,
 			}
 		}
 		{
+			uint64_t paid = 0, rem;
+			for (i = 0; i < kept; i++) {
+				paid += amounts[i];
+			}
+			rem = value > paid ? value - paid : 0;
+			if (rem && opt->payout_script && opt->payout_script_len >= 2
+			    && opt->payout_script_len <= 64) {
+				if (rem >= 546 && kept < PRIME_MAX_SPLIT_OUTPUTS) {
+					script_ptrs[kept] = opt->payout_script;
+					script_lens[kept] = opt->payout_script_len;
+					amounts[kept] = rem;
+					kept++;
+				} else if (kept) {
+					amounts[0] += rem;
+				}
+			}
+		}
+		{
 			prime_split_rec *r = split_slot_for(st, id);
 			memset(r, 0, sizeof *r);
 			r->id = id;
@@ -789,7 +807,8 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	if (status == PRIME_SHARE_ACCEPTED && opt->pool) {
 		char ident[PRIME_MAX_IDENTITY];
 		prime_identity_of((const char *)ua, ident, sizeof ident);
-		prime_pool_record_share(opt->pool, ident, share_diff, result, opt->coinbase_tag);
+		prime_pool_record_share(opt->pool, ident, share_diff, result,
+					st->public_stratum ? PRIME_SV1_TAG : opt->coinbase_tag);
 	}
 	if (status == PRIME_SHARE_ACCEPTED && meets_network) {
 		char ident[PRIME_MAX_IDENTITY];

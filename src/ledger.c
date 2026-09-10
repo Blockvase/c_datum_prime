@@ -31,7 +31,13 @@ typedef struct {
 typedef struct {
 	char identity[PRIME_MAX_IDENTITY];
 	uint64_t work;
+	uint64_t public_work;
 } prime_ident_work;
+
+static int share_tag_is_sv1(const char *tag)
+{
+	return tag && strcmp(tag, PRIME_SV1_TAG) == 0;
+}
 
 typedef struct {
 	unsigned char token[PRIME_RESUME_TOKEN_LEN];
@@ -45,6 +51,7 @@ struct prime_pool {
 	pthread_mutex_t mu;
 	char path[512];
 	uint64_t window;
+	int have_window;
 	uint64_t min_payout;
 	uint16_t fee_bps;
 	uint16_t fee_after_first_bps;
@@ -113,17 +120,29 @@ uint64_t prime_window_for_difficulty(double network_diff, double multiple, uint6
 	return scaled > floor ? scaled : floor;
 }
 
-static void ident_add(prime_pool *p, const char *identity, uint64_t diff, int add)
+static void ident_add(prime_pool *p, const char *identity, uint64_t diff, int add, int is_public)
 {
 	size_t i;
 	for (i = 0; i < p->nidents; i++) {
 		if (strcmp(p->idents[i].identity, identity) == 0) {
 			if (add) {
 				p->idents[i].work += diff;
-			} else if (p->idents[i].work >= diff) {
-				p->idents[i].work -= diff;
+				if (is_public) {
+					p->idents[i].public_work += diff;
+				}
 			} else {
-				p->idents[i].work = 0;
+				if (p->idents[i].work >= diff) {
+					p->idents[i].work -= diff;
+				} else {
+					p->idents[i].work = 0;
+				}
+				if (is_public) {
+					if (p->idents[i].public_work >= diff) {
+						p->idents[i].public_work -= diff;
+					} else {
+						p->idents[i].public_work = 0;
+					}
+				}
 			}
 			return;
 		}
@@ -133,6 +152,7 @@ static void ident_add(prime_pool *p, const char *identity, uint64_t diff, int ad
 	}
 	snprintf(p->idents[p->nidents].identity, PRIME_MAX_IDENTITY, "%s", identity);
 	p->idents[p->nidents].work = diff;
+	p->idents[p->nidents].public_work = is_public ? diff : 0;
 	p->nidents++;
 }
 
@@ -148,24 +168,71 @@ static void drop_oldest(prime_pool *p)
 	} else {
 		p->total_work = 0;
 	}
-	ident_add(p, s->identity, s->difficulty, 0);
+	ident_add(p, s->identity, s->difficulty, 0, share_tag_is_sv1(s->tag));
 	p->share_head = (p->share_head + 1) % PRIME_MAX_SHARES;
 	p->nshares--;
 }
 
 static void trim(prime_pool *p)
 {
-	while (p->nshares > 1 && p->total_work > p->window) {
-		uint64_t over = p->total_work - p->window;
-		prime_share_row *s = &p->shares[p->share_head];
-		if (s->difficulty > over) {
-			break;
+	if (p->have_window) {
+		while (p->nshares > 1 && p->total_work > p->window) {
+			uint64_t over = p->total_work - p->window;
+			prime_share_row *s = &p->shares[p->share_head];
+			if (s->difficulty > over) {
+				break;
+			}
+			drop_oldest(p);
 		}
-		drop_oldest(p);
 	}
 	while (p->nshares > PRIME_MAX_SHARES) {
 		drop_oldest(p);
 	}
+}
+
+static void save_window(prime_pool *p)
+{
+	FILE *f;
+	char path[600], tmp[608];
+
+	if (!p->have_window) {
+		return;
+	}
+	snprintf(path, sizeof path, "%s.window", p->path);
+	snprintf(tmp, sizeof tmp, "%s.window.tmp", p->path);
+	f = fopen(tmp, "w");
+	if (!f) {
+		return;
+	}
+	fprintf(f, "%llu\n", (unsigned long long)p->window);
+	if (fclose(f) != 0) {
+		remove(tmp);
+		return;
+	}
+	if (rename(tmp, path) != 0) {
+		remove(tmp);
+	}
+}
+
+static int load_window(prime_pool *p)
+{
+	FILE *f;
+	char path[600];
+	unsigned long long w = 0;
+
+	snprintf(path, sizeof path, "%s.window", p->path);
+	f = fopen(path, "r");
+	if (!f) {
+		return 0;
+	}
+	if (fscanf(f, "%llu", &w) != 1 || w < 1) {
+		fclose(f);
+		return 0;
+	}
+	fclose(f);
+	p->window = (uint64_t)w;
+	p->have_window = 1;
+	return 1;
 }
 
 static int replay_has(prime_pool *p, const unsigned char hash[32])
@@ -214,6 +281,9 @@ static void load_shares(prime_pool *p)
 		return;
 	}
 	while (fread(&s, sizeof s, 1, f) == 1) {
+		if (!s.at || !s.difficulty) {
+			continue;
+		}
 		if (p->nshares == PRIME_MAX_SHARES) {
 			drop_oldest(p);
 		}
@@ -221,7 +291,7 @@ static void load_shares(prime_pool *p)
 		p->nshares++;
 		p->total_work += s.difficulty;
 		p->cumulative_work += s.difficulty;
-		ident_add(p, s.identity, s.difficulty, 1);
+		ident_add(p, s.identity, s.difficulty, 1, share_tag_is_sv1(s.tag));
 		replay_add(p, s.hash);
 	}
 	fclose(f);
@@ -381,17 +451,26 @@ prime_pool *prime_pool_open(const char *path, uint64_t window, uint64_t min_payo
 	}
 	pthread_mutex_init(&p->mu, NULL);
 	snprintf(p->path, sizeof p->path, "%s", path ? path : "data/ledger");
-	p->window = window ? window : 1;
+	p->window = 1;
+	p->have_window = 0;
 	p->min_payout = min_payout;
 	p->fee_bps = fee_bps > 100 ? 100 : fee_bps;
 	load_shares(p);
+	if (load_window(p)) {
+		trim(p);
+	} else if (window) {
+		p->window = window;
+		p->have_window = 1;
+		trim(p);
+	}
 	load_sessions(p);
 	load_owed(p);
 	load_blocks(p);
 	apply_fee_after_first(p);
-	fprintf(stderr, "prime: ledger %s shares=%zu work=%llu window=%llu blocks=%llu owed=%zu\n",
+	fprintf(stderr, "prime: ledger %s shares=%zu work=%llu window=%llu%s blocks=%llu owed=%zu\n",
 		p->path, p->nshares, (unsigned long long)p->total_work,
-		(unsigned long long)p->window, (unsigned long long)p->blocks_found, p->nowed);
+		(unsigned long long)p->window, p->have_window ? "" : " (pending difficulty)",
+		(unsigned long long)p->blocks_found, p->nowed);
 	return p;
 }
 
@@ -427,7 +506,9 @@ void prime_pool_set_window(prime_pool *p, uint64_t window)
 	}
 	pthread_mutex_lock(&p->mu);
 	p->window = window ? window : 1;
+	p->have_window = 1;
 	trim(p);
+	save_window(p);
 	pthread_mutex_unlock(&p->mu);
 }
 
@@ -452,7 +533,7 @@ int prime_pool_record_share(prime_pool *p, const char *identity, uint64_t diffic
 	p->nshares++;
 	p->total_work += difficulty;
 	p->cumulative_work += difficulty;
-	ident_add(p, identity, difficulty, 1);
+	ident_add(p, identity, difficulty, 1, share_tag_is_sv1(s.tag));
 	trim(p);
 	append_row(p, &s);
 	pthread_mutex_unlock(&p->mu);
@@ -525,12 +606,85 @@ static void json_escape_append(char **cur, size_t *left, const char *s)
 	}
 }
 
+static uint64_t ident_side_work(const prime_ident_work *row, int public_side)
+{
+	if (public_side) {
+		return row->public_work > row->work ? row->work : row->public_work;
+	}
+	return row->work > row->public_work ? row->work - row->public_work : 0;
+}
+
+static size_t pot_split(prime_ident_work *kept, size_t n, int public_side, uint64_t pot,
+			uint64_t min_payout, char idents[][PRIME_MAX_IDENTITY], uint64_t *amounts,
+			size_t max_n)
+{
+	size_t i, m = 0;
+	uint64_t work = 0, left;
+	prime_ident_work row[PRIME_MAX_IDENTS];
+
+	if (!pot || !n || !max_n) {
+		return 0;
+	}
+	for (i = 0; i < n; i++) {
+		uint64_t w = ident_side_work(&kept[i], public_side);
+		if (!w) {
+			continue;
+		}
+		row[m] = kept[i];
+		row[m].work = w;
+		m++;
+	}
+	if (!m) {
+		return 0;
+	}
+	qsort(row, m, sizeof row[0], cmp_ident_desc);
+	if (m > max_n) {
+		m = max_n;
+	}
+	for (i = 0; i < m; i++) {
+		work += row[i].work;
+	}
+	while (m) {
+		uint64_t w = row[m - 1].work;
+		if (!work) {
+			m = 0;
+			break;
+		}
+		if ((uint64_t)((unsigned __int128)pot * w / work) >= min_payout) {
+			break;
+		}
+		work -= w;
+		m--;
+	}
+	left = pot;
+	for (i = 0; i < m; i++) {
+		uint64_t amount;
+		if (!work) {
+			break;
+		}
+		amount = (uint64_t)((unsigned __int128)left * row[i].work / work);
+		left -= amount;
+		work -= row[i].work;
+		if (!amount) {
+			continue;
+		}
+		snprintf(idents[i], PRIME_MAX_IDENTITY, "%s", row[i].identity);
+		amounts[i] = amount;
+	}
+	return i;
+}
+
 size_t prime_pool_split(prime_pool *p, uint64_t value, char idents[][PRIME_MAX_IDENTITY],
 			uint64_t *amounts, size_t max_n)
 {
 	prime_ident_work kept[PRIME_MAX_IDENTS];
-	size_t n = 0, i;
-	uint64_t miners, work = 0, left, min_payout;
+	char dat_id[PRIME_MAX_SPLIT_OUTPUTS][PRIME_MAX_IDENTITY];
+	char pub_id[PRIME_MAX_SPLIT_OUTPUTS][PRIME_MAX_IDENTITY];
+	uint64_t dat_amt[PRIME_MAX_SPLIT_OUTPUTS];
+	uint64_t pub_amt[PRIME_MAX_SPLIT_OUTPUTS];
+	size_t n = 0, i, nd = 0, np = 0, out = 0;
+	uint64_t min_payout, pub_w = 0, total, slice_pub, slice_dat, datum_fee, pub_fee, rebate;
+	uint64_t datum_pot, pub_pot;
 	uint16_t fee;
 
 	if (!p || !idents || !amounts || !max_n) {
@@ -539,8 +693,8 @@ size_t prime_pool_split(prime_pool *p, uint64_t value, char idents[][PRIME_MAX_I
 	pthread_mutex_lock(&p->mu);
 	fee = p->fee_bps;
 	min_payout = p->min_payout;
-	miners = value - (uint64_t)((unsigned __int128)value * fee / 10000);
-	if (!p->total_work || !miners) {
+	total = p->total_work;
+	if (!total) {
 		pthread_mutex_unlock(&p->mu);
 		return 0;
 	}
@@ -549,46 +703,51 @@ size_t prime_pool_split(prime_pool *p, uint64_t value, char idents[][PRIME_MAX_I
 		n = PRIME_MAX_IDENTS;
 	}
 	memcpy(kept, p->idents, n * sizeof kept[0]);
+	for (i = 0; i < n; i++) {
+		pub_w += ident_side_work(&kept[i], 1);
+	}
 	pthread_mutex_unlock(&p->mu);
 
-	qsort(kept, n, sizeof kept[0], cmp_ident_desc);
-	if (n > max_n) {
-		n = max_n;
+	slice_pub = (uint64_t)((unsigned __int128)value * pub_w / total);
+	if (slice_pub > value) {
+		slice_pub = value;
 	}
-	if (n > PRIME_MAX_COINBASER_OUTPUTS) {
-		n = PRIME_MAX_COINBASER_OUTPUTS;
+	slice_dat = value - slice_pub;
+	datum_fee = (uint64_t)((unsigned __int128)slice_dat * fee / 10000);
+	pub_fee = (uint64_t)((unsigned __int128)slice_pub * PRIME_SV1_FEE_BPS / 10000);
+	rebate = (uint64_t)((unsigned __int128)slice_pub * PRIME_SV1_DATUM_REBATE_BPS / 10000);
+	datum_pot = slice_dat - datum_fee + rebate;
+	pub_pot = slice_pub - pub_fee;
+	if (max_n > PRIME_MAX_SPLIT_OUTPUTS) {
+		max_n = PRIME_MAX_SPLIT_OUTPUTS;
 	}
-	for (i = 0; i < n; i++) {
-		work += kept[i].work;
+	if (max_n > PRIME_MAX_COINBASER_OUTPUTS) {
+		max_n = PRIME_MAX_COINBASER_OUTPUTS;
 	}
-	while (n) {
-		uint64_t w = kept[n - 1].work;
-		if (!work) {
-			n = 0;
-			break;
+	nd = pot_split(kept, n, 0, datum_pot, min_payout, dat_id, dat_amt, max_n);
+	np = pot_split(kept, n, 1, pub_pot, min_payout, pub_id, pub_amt, max_n);
+	for (i = 0; i < nd && out < max_n; i++) {
+		snprintf(idents[out], PRIME_MAX_IDENTITY, "%s", dat_id[i]);
+		amounts[out] = dat_amt[i];
+		out++;
+	}
+	for (i = 0; i < np && out < max_n; i++) {
+		size_t j, found = (size_t)-1;
+		for (j = 0; j < out; j++) {
+			if (strcmp(idents[j], pub_id[i]) == 0) {
+				found = j;
+				break;
+			}
 		}
-		if ((uint64_t)((unsigned __int128)miners * w / work) >= min_payout) {
-			break;
-		}
-		work -= w;
-		n--;
-	}
-	left = miners;
-	for (i = 0; i < n; i++) {
-		uint64_t amount;
-		if (!work) {
-			break;
-		}
-		amount = (uint64_t)((unsigned __int128)left * kept[i].work / work);
-		left -= amount;
-		work -= kept[i].work;
-		if (!amount) {
+		if (found != (size_t)-1) {
+			amounts[found] += pub_amt[i];
 			continue;
 		}
-		snprintf(idents[i], PRIME_MAX_IDENTITY, "%s", kept[i].identity);
-		amounts[i] = amount;
+		snprintf(idents[out], PRIME_MAX_IDENTITY, "%s", pub_id[i]);
+		amounts[out] = pub_amt[i];
+		out++;
 	}
-	return i;
+	return out;
 }
 
 int prime_pool_record_block(prime_pool *p, uint32_t height, const unsigned char hash[32],
@@ -624,7 +783,15 @@ int prime_pool_record_block(prime_pool *p, uint32_t height, const unsigned char 
 
 static double work_to_hashrate_hs(uint64_t work)
 {
-	return ((double)work * PRIME_HASHES_PER_DIFF) / (double)PRIME_HASHRATE_WINDOW_SEC;
+	return prime_work_to_hashrate_hs(work, PRIME_HASHRATE_WINDOW_SEC);
+}
+
+double prime_work_to_hashrate_hs(uint64_t work, uint64_t seconds)
+{
+	if (!seconds) {
+		seconds = 1;
+	}
+	return ((double)work * PRIME_HASHES_PER_DIFF) / (double)seconds;
 }
 
 static uint64_t ident_window_work(const prime_ident_work *snap, size_t n, const char *identity)
@@ -713,10 +880,19 @@ int prime_pool_stats_json(prime_pool *p, char *out, size_t out_len)
 		cur += w;
 		left -= (size_t)w;
 		json_escape_append(&cur, &left, snap[i].identity);
-		w = snprintf(cur, left,
-			     "\",\"work\":%llu,\"window_percent\":%.6f,"
-			     "\"hashrate_hs\":%.8g,\"hash_percent\":%.6f}",
-			     (unsigned long long)snap[i].work, pct, hs, hpct);
+		{
+			uint64_t pub_w = snap[i].public_work > snap[i].work
+					 ? snap[i].work : snap[i].public_work;
+			uint64_t dat_w = snap[i].work > pub_w ? snap[i].work - pub_w : 0;
+			const char *kind = pub_w == 0 ? "datum" : (dat_w == 0 ? "sv1" : "mixed");
+			w = snprintf(cur, left,
+				     "\",\"work\":%llu,\"datum_work\":%llu,\"public_work\":%llu,"
+				     "\"kind\":\"%s\",\"window_percent\":%.6f,"
+				     "\"hashrate_hs\":%.8g,\"hash_percent\":%.6f}",
+				     (unsigned long long)snap[i].work,
+				     (unsigned long long)dat_w, (unsigned long long)pub_w,
+				     kind, pct, hs, hpct);
+		}
 		if (w < 0 || (size_t)w >= left) {
 			break;
 		}
@@ -752,6 +928,45 @@ double prime_pool_hashrate_hs(prime_pool *p)
 	}
 	pthread_mutex_unlock(&p->mu);
 	return work_to_hashrate_hs(work);
+}
+
+int prime_pool_work_since(prime_pool *p, uint64_t cutoff, uint64_t *total,
+			  uint64_t *sv1, uint64_t *oldest_at, uint64_t *count)
+{
+	size_t si;
+	uint64_t tot = 0, pub = 0, n = 0, oldest = 0;
+	if (!p) {
+		return -1;
+	}
+	pthread_mutex_lock(&p->mu);
+	for (si = 0; si < p->nshares; si++) {
+		const prime_share_row *s = &p->shares[(p->share_head + si) % PRIME_MAX_SHARES];
+		if (s->at < cutoff) {
+			continue;
+		}
+		tot += s->difficulty;
+		if (share_tag_is_sv1(s->tag)) {
+			pub += s->difficulty;
+		}
+		if (!oldest || s->at < oldest) {
+			oldest = s->at;
+		}
+		n++;
+	}
+	pthread_mutex_unlock(&p->mu);
+	if (total) {
+		*total = tot;
+	}
+	if (sv1) {
+		*sv1 = pub;
+	}
+	if (oldest_at) {
+		*oldest_at = oldest;
+	}
+	if (count) {
+		*count = n;
+	}
+	return 0;
 }
 
 uint64_t prime_pool_share_count(const prime_pool *p)
@@ -918,6 +1133,90 @@ int prime_pool_void_owed(prime_pool *p, const unsigned char hash[32])
 	}
 	pthread_mutex_unlock(&p->mu);
 	return 1;
+}
+
+int prime_pool_shares_json(prime_pool *p, char *out, size_t out_len,
+			   const unsigned char *after_hash, size_t limit)
+{
+	size_t i, n, emitted = 0, start = 0;
+	int w;
+	char *cur;
+	size_t left;
+	unsigned char last[32];
+	int have_last = 0;
+
+	if (!p || !out || out_len < 64) {
+		return -1;
+	}
+	if (!limit) {
+		limit = 500;
+	}
+	if (limit > 2000) {
+		limit = 2000;
+	}
+	pthread_mutex_lock(&p->mu);
+	n = p->nshares;
+	if (after_hash) {
+		int found = 0;
+		for (i = 0; i < n; i++) {
+			size_t idx = (p->share_head + i) % PRIME_MAX_SHARES;
+			if (memcmp(p->shares[idx].hash, after_hash, 32) == 0) {
+				start = i + 1;
+				found = 1;
+				break;
+			}
+		}
+		if (!found) {
+			start = n;
+		}
+	}
+	cur = out;
+	left = out_len;
+	w = snprintf(cur, left,
+		     "{\"schema_version\":1,\"updated_at\":%llu,\"shares\":%zu,\"work\":%llu,"
+		     "\"window\":%llu,\"limit\":%zu,\"entries\":[",
+		     (unsigned long long)time(NULL), n, (unsigned long long)p->total_work,
+		     (unsigned long long)p->window, limit);
+	if (w < 0 || (size_t)w >= left) {
+		pthread_mutex_unlock(&p->mu);
+		return -1;
+	}
+	cur += w;
+	left -= (size_t)w;
+	for (i = start; i < n && emitted < limit; i++) {
+		char hex[65];
+		size_t idx = (p->share_head + i) % PRIME_MAX_SHARES;
+		const prime_share_row *s = &p->shares[idx];
+		prime_hex_encode(s->hash, 32, hex, sizeof hex);
+		w = snprintf(cur, left,
+			     "%s{\"at\":%llu,\"difficulty\":%llu,\"id\":\"%s\",\"hash\":\"%s\"}",
+			     emitted ? "," : "", (unsigned long long)s->at,
+			     (unsigned long long)s->difficulty, s->identity, hex);
+		if (w < 0 || (size_t)w >= left) {
+			pthread_mutex_unlock(&p->mu);
+			return -1;
+		}
+		cur += w;
+		left -= (size_t)w;
+		memcpy(last, s->hash, 32);
+		have_last = 1;
+		emitted++;
+	}
+	{
+		int more = (start + emitted) < n;
+		char next[65];
+		next[0] = 0;
+		if (more && have_last) {
+			prime_hex_encode(last, 32, next, sizeof next);
+		}
+		w = snprintf(cur, left, "],\"count\":%zu,\"has_more\":%s,\"next_after\":\"%s\"}",
+			     emitted, more ? "true" : "false", next);
+	}
+	pthread_mutex_unlock(&p->mu);
+	if (w < 0 || (size_t)w >= left) {
+		return -1;
+	}
+	return 0;
 }
 
 int prime_pool_list_owed(prime_pool *p, FILE *out)

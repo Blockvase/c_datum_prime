@@ -31,6 +31,7 @@ add_executable(c-datum-prime
   src/bulk.c
   src/stats.c
   src/rpc.c
+  src/cap.c
 )
 
 target_include_directories(c-datum-prime PRIVATE src)

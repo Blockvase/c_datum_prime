@@ -74,6 +74,83 @@ int prime_rpc_difficulty(const char *datadir, double *out)
 	return 0;
 }
 
+int prime_rpc_networkhashps(const char *datadir, unsigned blocks, double *out)
+{
+	char rest[64];
+	char line[128];
+	double d;
+	if (!out) {
+		return -1;
+	}
+	if (snprintf(rest, sizeof rest, "getnetworkhashps %u", blocks ? blocks : 120) >= (int)sizeof rest) {
+		return -1;
+	}
+	if (prime_rpc_call(datadir, rest, line, sizeof line) != 0) {
+		return -1;
+	}
+	d = strtod(line, NULL);
+	if (!(d > 0)) {
+		return -1;
+	}
+	*out = d;
+	return 0;
+}
+
+int prime_rpc_lookback_since(const char *datadir, unsigned blocks, uint64_t *since)
+{
+	char count_s[32];
+	char rest[96];
+	char hash[80];
+	char hdr[4096];
+	const char *p, *colon;
+	char *end;
+	long height, start;
+	unsigned long t;
+	if (!since) {
+		return -1;
+	}
+	if (prime_rpc_call(datadir, "getblockcount", count_s, sizeof count_s) != 0) {
+		return -1;
+	}
+	height = strtol(count_s, NULL, 10);
+	if (height < 0) {
+		return -1;
+	}
+	if (!blocks) {
+		blocks = PRIME_NETHASH_BLOCKS;
+	}
+	start = height - (long)blocks + 1;
+	if (start < 0) {
+		start = 0;
+	}
+	if (snprintf(rest, sizeof rest, "getblockhash %ld", start) >= (int)sizeof rest) {
+		return -1;
+	}
+	if (prime_rpc_call(datadir, rest, hash, sizeof hash) != 0 || !hash[0]) {
+		return -1;
+	}
+	if (snprintf(rest, sizeof rest, "getblockheader %s", hash) >= (int)sizeof rest) {
+		return -1;
+	}
+	if (prime_rpc_call(datadir, rest, hdr, sizeof hdr) != 0) {
+		return -1;
+	}
+	p = strstr(hdr, "\"time\":");
+	if (!p) {
+		return -1;
+	}
+	colon = strchr(p, ':');
+	if (!colon) {
+		return -1;
+	}
+	t = strtoul(colon + 1, &end, 10);
+	if (end == colon + 1 || !t) {
+		return -1;
+	}
+	*since = (uint64_t)t;
+	return 0;
+}
+
 int prime_parent_have(const char *datadir, const unsigned char prev_hash[32])
 {
 	unsigned char rev[32];
@@ -156,7 +233,8 @@ int prime_tip_start(const char *datadir, prime_pool *pool, double multiple, uint
 		fprintf(stderr, "prime: network difficulty %.2f window %llu\n",
 			d, (unsigned long long)win);
 	} else {
-		fprintf(stderr, "prime: could not read getdifficulty; window stays at floor\n");
+		fprintf(stderr,
+			"prime: could not read getdifficulty; keeping loaded shares until RPC is up\n");
 	}
 	a = calloc(1, sizeof *a);
 	if (!a) {
