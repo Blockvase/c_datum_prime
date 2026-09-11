@@ -34,6 +34,7 @@ static int g_require_split;
 static uint16_t g_sv1_port;
 static pthread_mutex_t g_client_mu = PTHREAD_MUTEX_INITIALIZER;
 static unsigned g_clients;
+static unsigned g_sv1_clients;
 
 static void copy_url_host(const char *url, char *out, size_t out_len)
 {
@@ -68,20 +69,42 @@ static unsigned connected_clients(void)
 	return n;
 }
 
-void prime_stats_client_open(void)
+void prime_stats_client_open(int public_stratum)
 {
+	if (public_stratum) {
+		return;
+	}
 	pthread_mutex_lock(&g_client_mu);
 	g_clients++;
 	pthread_mutex_unlock(&g_client_mu);
 }
 
-void prime_stats_client_close(void)
+void prime_stats_client_close(int public_stratum)
 {
+	if (public_stratum) {
+		return;
+	}
 	pthread_mutex_lock(&g_client_mu);
 	if (g_clients) {
 		g_clients--;
 	}
 	pthread_mutex_unlock(&g_client_mu);
+}
+
+void prime_sv1_note_connected(unsigned n)
+{
+	pthread_mutex_lock(&g_client_mu);
+	g_sv1_clients = n;
+	pthread_mutex_unlock(&g_client_mu);
+}
+
+unsigned prime_sv1_connected_clients(void)
+{
+	unsigned n;
+	pthread_mutex_lock(&g_client_mu);
+	n = g_sv1_clients;
+	pthread_mutex_unlock(&g_client_mu);
+	return n;
 }
 
 static int write_all(int fd, const void *buf, size_t n);
@@ -256,6 +279,7 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			"},"
 			"\"status\":{"
 			"\"connected_datum_clients\":%u,"
+			"\"connected_sv1_clients\":%u,"
 			"\"min_difficulty\":%llu,"
 			"\"shares\":%llu,"
 			"\"work\":%llu,"
@@ -298,6 +322,7 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			100.0 - (double)PRIME_SV1_FEE_BPS / 100.0,
 			g_fee_after_first ? "true" : "false",
 			(unsigned)(g_fee_after_first ? g_fee_bps : fee_bps), clients,
+			prime_sv1_connected_clients(),
 			(unsigned long long)g_min_diff, (unsigned long long)shares,
 			(unsigned long long)work, (unsigned long long)window, progress,
 			(unsigned long long)blocks, prime_pool_hashrate_hs(g_pool),

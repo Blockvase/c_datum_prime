@@ -377,6 +377,80 @@ static int parse_clients(const char *json, cap_client *out, size_t max, size_t *
 	return 0;
 }
 
+static int count_client_objects(const char *json, unsigned *n_out)
+{
+	const char *arr, *p;
+	int depth = 0;
+	unsigned n = 0;
+
+	if (n_out) {
+		*n_out = 0;
+	}
+	if (!json) {
+		return -1;
+	}
+	arr = strstr(json, "\"clients\"");
+	if (!arr) {
+		return 0;
+	}
+	arr = strchr(arr, '[');
+	if (!arr) {
+		return -1;
+	}
+	p = arr + 1;
+	while (*p && *p != ']') {
+		if (*p == '"') {
+			p++;
+			while (*p && *p != '"') {
+				if (*p == '\\' && p[1]) {
+					p++;
+				}
+				p++;
+			}
+			if (*p == '"') {
+				p++;
+			}
+			continue;
+		}
+		if (*p == '{') {
+			if (depth == 0) {
+				n++;
+			}
+			depth++;
+		} else if (*p == '}') {
+			if (depth) {
+				depth--;
+			}
+		}
+		p++;
+	}
+	if (n_out) {
+		*n_out = n;
+	}
+	return 0;
+}
+
+static int gw_cmd(const char *host, uint16_t port, const char *password, const char *cmd_json,
+		  char **resp);
+
+static void refresh_sv1_connected(const char *host, uint16_t port, const char *password)
+{
+	char *resp = NULL;
+	unsigned n = 0;
+
+	if (!password || !password[0] || !host || !host[0]) {
+		return;
+	}
+	if (gw_cmd(host, port, password, "{\"cmd\":\"list_clients\"}", &resp) != 0 || !resp) {
+		free(resp);
+		return;
+	}
+	if (count_client_objects(resp, &n) == 0) {
+		prime_sv1_note_connected(n);
+	}
+	free(resp);
+}
+
 static int cmp_newest(const void *a, const void *b)
 {
 	const cap_client *x = a, *y = b;
@@ -509,6 +583,9 @@ static void *cap_thread(void *arg)
 		return NULL;
 	}
 	password = getenv("PRIME_SV1_API_PASSWORD");
+	if (password && password[0]) {
+		refresh_sv1_connected(a->api_host, a->api_port, password);
+	}
 	for (;;) {
 		prime_nethash_snap s;
 		int admit = 0, kick_all = 0, shed = 0, admit_changed;
@@ -520,6 +597,9 @@ static void *cap_thread(void *arg)
 			sleep(PRIME_CAP_INTERVAL_SEC);
 		}
 		refresh_snap(a->pool, a->datadir, g_admit);
+		if (password && password[0]) {
+			refresh_sv1_connected(a->api_host, a->api_port, password);
+		}
 		prime_nethash_get(&s);
 		if (!s.have_nethash || s.network_hs <= 0) {
 			fprintf(stderr, "prime: nethash RPC unavailable; SV1 cap not enforced this tick\n");
@@ -566,6 +646,7 @@ static void *cap_thread(void *arg)
 				free(cls);
 				continue;
 			}
+			prime_sv1_note_connected((unsigned)n);
 			qsort(cls, n, sizeof cls[0], cmp_newest);
 			for (i = 0; i < n; i++) {
 				live += cls[i].hs;
