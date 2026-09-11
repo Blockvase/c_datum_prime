@@ -1427,17 +1427,9 @@ static int evict_empty_for_add(prime_pool *p, int pending)
 	}
 	if (pending) {
 		for (i = 0; i < p->nempty; i++) {
-			if (p->empty[i].pending) {
+			if (!p->empty[i].pending && p->empty[i].settled_at) {
 				drop = (int)i;
 				break;
-			}
-		}
-		if (drop < 0) {
-			for (i = 0; i < p->nempty; i++) {
-				if (p->empty[i].settled_at) {
-					drop = (int)i;
-					break;
-				}
 			}
 		}
 		if (drop < 0) {

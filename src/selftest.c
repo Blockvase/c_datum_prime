@@ -1408,6 +1408,63 @@ static int test_empty_find_snapshot(void)
 	remove("/tmp/c-datum-prime-selftest-empty-full.blocks");
 	remove("/tmp/c-datum-prime-selftest-empty-full.owed");
 	remove("/tmp/c-datum-prime-selftest-empty-full.empty");
+	p = prime_pool_open("/tmp/c-datum-prime-selftest-empty-full", 1000000, 546, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: empty pending open failed\n");
+		return -1;
+	}
+	memset(hash, 1, sizeof hash);
+	if (prime_pool_record_share(p, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65536, hash,
+				    "") != 0) {
+		fprintf(stderr, "selftest: empty pending share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	{
+		unsigned char inflight[32];
+		unsigned char extra[32];
+		size_t i;
+		memset(inflight, 0, sizeof inflight);
+		inflight[0] = 0x31;
+		memset(extra, 0xbb, sizeof extra);
+		for (i = 0; i < 31; i++) {
+			unsigned char h[32];
+			memset(h, 0, sizeof h);
+			h[0] = (unsigned char)(i + 1);
+			if (prime_pool_record_empty(p, (uint32_t)(400 + i), h,
+						    "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						    100000000) != 0) {
+				fprintf(stderr, "selftest: empty pending record %zu failed\n", i);
+				prime_pool_close(p);
+				return -1;
+			}
+		}
+		cap = fopen("/dev/null", "w");
+		if (!cap
+		    || prime_pool_prepare_empty(p, 500, inflight,
+						"bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						100000000) != 0
+		    || prime_pool_prepare_empty(p, 501, extra,
+						"bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						100000000) == 0
+		    || prime_pool_commit_empty(p, inflight) != 0
+		    || prime_pool_empty_count(p) != 32
+		    || prime_pool_empty_sendmany(p, inflight, cap) != 0) {
+			fprintf(stderr, "selftest: empty prepare evicted a pending find\n");
+			if (cap) {
+				fclose(cap);
+			}
+			prime_pool_close(p);
+			return -1;
+		}
+		fclose(cap);
+	}
+	prime_pool_close(p);
+	remove("/tmp/c-datum-prime-selftest-empty-full.shares");
+	remove("/tmp/c-datum-prime-selftest-empty-full.window");
+	remove("/tmp/c-datum-prime-selftest-empty-full.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty-full.owed");
+	remove("/tmp/c-datum-prime-selftest-empty-full.empty");
 	remove("/tmp/c-datum-prime-selftest-empty-fee.shares");
 	remove("/tmp/c-datum-prime-selftest-empty-fee.window");
 	remove("/tmp/c-datum-prime-selftest-empty-fee.blocks");
