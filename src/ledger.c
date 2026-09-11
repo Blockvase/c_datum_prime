@@ -1308,6 +1308,81 @@ int prime_pool_void_owed(prime_pool *p, const unsigned char hash[32])
 	return 1;
 }
 
+static int drop_block_lines(prime_pool *p, const char *want_hex)
+{
+	FILE *in, *out;
+	char path[600], tmp[600], line[512];
+	int dropped = 0;
+
+	snprintf(path, sizeof path, "%s.blocks", p->path);
+	snprintf(tmp, sizeof tmp, "%s.blocks.tmp", p->path);
+	in = fopen(path, "r");
+	if (!in) {
+		return 0;
+	}
+	out = fopen(tmp, "w");
+	if (!out) {
+		fclose(in);
+		return -1;
+	}
+	while (fgets(line, sizeof line, in)) {
+		unsigned height = 0;
+		char hex[65];
+
+		if (sscanf(line, "%u %64s", &height, hex) == 2 && strcmp(hex, want_hex) == 0) {
+			dropped++;
+			continue;
+		}
+		fputs(line, out);
+	}
+	fclose(in);
+	fclose(out);
+	if (!dropped) {
+		remove(tmp);
+		return 0;
+	}
+	if (rename(tmp, path) != 0) {
+		remove(tmp);
+		return -1;
+	}
+	return dropped;
+}
+
+int prime_pool_void_block(prime_pool *p, const unsigned char hash[32])
+{
+	char hex[65];
+	int owed_rc, dropped;
+
+	if (!p || !hash || prime_hex_encode(hash, 32, hex, sizeof hex) != 0) {
+		return -1;
+	}
+	owed_rc = prime_pool_void_owed(p, hash);
+	if (owed_rc < 0) {
+		return -1;
+	}
+	pthread_mutex_lock(&p->mu);
+	dropped = drop_block_lines(p, hex);
+	if (dropped < 0) {
+		pthread_mutex_unlock(&p->mu);
+		return -1;
+	}
+	if (dropped) {
+		if (p->blocks_found >= (uint64_t)dropped) {
+			p->blocks_found -= (uint64_t)dropped;
+		} else {
+			p->blocks_found = 0;
+		}
+		apply_fee_after_first(p);
+		fprintf(stderr, "prime: voided %d blocks row(s) %s; blocks_found=%llu fee=%u bps\n",
+			dropped, hex, (unsigned long long)p->blocks_found, (unsigned)p->fee_bps);
+	}
+	pthread_mutex_unlock(&p->mu);
+	if (owed_rc == 0 || dropped) {
+		return 0;
+	}
+	return 1;
+}
+
 int prime_pool_shares_json(prime_pool *p, char *out, size_t out_len,
 			   const unsigned char *after_hash, size_t limit)
 {

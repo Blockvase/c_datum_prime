@@ -13,6 +13,12 @@ void prime_xor_key_hash(const unsigned char xor_key[16], unsigned char out[32])
 	prime_tagged_sha256("Bitcoin block hash PoW XOR key", xor_key, 16, out);
 }
 
+uint8_t prime_abw_clear_bits(uint8_t pot)
+{
+	unsigned n = 32u + (unsigned)pot;
+	return n > 255u ? 255 : (uint8_t)n;
+}
+
 void prime_xor_mask(const unsigned char xor_key[16], uint8_t clear_bits, unsigned char out[32])
 {
 	unsigned i, clear_bytes;

@@ -229,7 +229,7 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 	fprintf(stderr, "[%s] sent %s 0x99 config (%zu bytes, signed, abw_disabled=%d)\n",
 		peer_s, hello.generation == PRIME_GEN_V3 ? "v3" : "v1", cfg_wire_len,
 		opt->abw_disabled ? 1 : 0);
-	prime_stats_client_open();
+	prime_stats_client_open(public_stratum);
 	counted_client = 1;
 
 	if (hello.generation == PRIME_GEN_V3 && !opt->abw_disabled) {
@@ -373,7 +373,7 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 				      mining.next_coinbaser_id, mining.abw_on ? &mining.abw : NULL);
 	}
 	if (counted_client) {
-		prime_stats_client_close();
+		prime_stats_client_close(public_stratum);
 	}
 	free(bulk);
 	prime_conn_mining_free(&mining);
@@ -713,8 +713,8 @@ int main(int argc, char **argv)
 		if (prime_hex_decode(void_arg, hash, 32) != 0) {
 			fprintf(stderr, "--void-block takes 64 hex digits\n");
 			rc = 2;
-		} else if (prime_pool_void_owed(opt.pool, hash) != 0) {
-			fprintf(stderr, "no owed block under %s\n", void_arg);
+		} else if (prime_pool_void_block(opt.pool, hash) != 0) {
+			fprintf(stderr, "no block or owed row under %s\n", void_arg);
 			rc = 2;
 		}
 		prime_pool_close(opt.pool);

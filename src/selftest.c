@@ -877,6 +877,26 @@ static int test_fee_after_first_block(void)
 		prime_pool_close(p);
 		return -1;
 	}
+	if (prime_pool_void_block(p, hash) != 0
+	    || prime_pool_fee_bps(p) != 0 || prime_pool_blocks_found(p) != 0) {
+		fprintf(stderr, "selftest: void-block did not restore 0 fee / 0 blocks\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	p = prime_pool_open(path, 1000000, 0, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: fee-after void reopen failed\n");
+		return -1;
+	}
+	prime_pool_set_fee_after_first_block(p, 21);
+	if (prime_pool_fee_bps(p) != 0 || prime_pool_blocks_found(p) != 0) {
+		fprintf(stderr, "selftest: void-block reopen still has fee=%u blocks=%llu\n",
+			(unsigned)prime_pool_fee_bps(p),
+			(unsigned long long)prime_pool_blocks_found(p));
+		prime_pool_close(p);
+		return -1;
+	}
 	prime_pool_close(p);
 	return 0;
 }
@@ -1474,6 +1494,52 @@ static int test_empty_find_snapshot(void)
 	return 0;
 }
 
+static int test_abw_submit_header(void)
+{
+	unsigned char prev[32], merkle[32], en[16], rhs[32], key[16], z16[16];
+	unsigned char hashed[32], stripped[32], ser[PRIME_HEADER_V2_SIZE];
+	uint8_t pot = 16;
+	uint8_t clear;
+	unsigned i;
+
+	if (prime_abw_clear_bits(0) != 32 || prime_abw_clear_bits(10) != 42
+	    || prime_abw_clear_bits(223) != 255 || prime_abw_clear_bits(255) != 255) {
+		fprintf(stderr, "selftest: abw clear_bits failed\n");
+		return -1;
+	}
+	memset(prev, 1, sizeof prev);
+	memset(merkle, 2, sizeof merkle);
+	memset(en, 3, sizeof en);
+	memset(rhs, 4, sizeof rhs);
+	memset(z16, 0, sizeof z16);
+	for (i = 0; i < 16; i++) {
+		key[i] = (unsigned char)(i + 1);
+	}
+	clear = prime_abw_clear_bits(pot);
+	if (prime_header_pow_hash_abw(prev, merkle, 536870912u, 2000000000u, 486604799u,
+				      1, 2, 3, 0, en, 3, 4, 840000, rhs, key, pot, hashed) != 0) {
+		fprintf(stderr, "selftest: abw hash failed\n");
+		return -1;
+	}
+	prime_header_v2_serialize(ser, 536870912u, prev, merkle, 2000000000u, 486604799u,
+				  1, 2, 3, en, 0, 3, 4, clear, key, 840000, rhs);
+	if (ser[111] != clear || memcmp(ser + 112, key, 16) != 0) {
+		fprintf(stderr, "selftest: abw header missing xor key/clear\n");
+		return -1;
+	}
+	if (prime_header_pow_hash_abw(prev, merkle, 536870912u, 2000000000u, 486604799u,
+				      1, 2, 3, 0, en, 3, 4, 840000, rhs, z16, pot,
+				      stripped) != 0) {
+		fprintf(stderr, "selftest: stripped abw hash failed\n");
+		return -1;
+	}
+	if (memcmp(hashed, stripped, 32) == 0) {
+		fprintf(stderr, "selftest: zeroing the xor key must change the pow hash\n");
+		return -1;
+	}
+	return 0;
+}
+
 int prime_selftest(void)
 {
 	if (sodium_init() < 0) {
@@ -1485,6 +1551,7 @@ int prime_selftest(void)
 	    || test_nk_and_nonces() != 0
 	    || test_handshake_and_config() != 0
 	    || test_targets_and_header_vector() != 0
+	    || test_abw_submit_header() != 0
 	    || test_ledger_address_abw() != 0
 	    || test_require_split() != 0
 	    || test_coinbaser_prevhash() != 0

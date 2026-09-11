@@ -422,7 +422,7 @@ int prime_header_pow_hash_abw(const unsigned char prev_block[32], const unsigned
 				break;
 			}
 		}
-		clear = nz ? (uint8_t)((32u + (unsigned)pot) > 255u ? 255u : 32u + (unsigned)pot) : 0;
+		clear = nz ? prime_abw_clear_bits(pot) : 0;
 		h1d[i++] = clear;
 	}
 	memcpy(h1d + i, xor_key_hash, 32);
@@ -467,7 +467,7 @@ int prime_header_pow_hash_abw(const unsigned char prev_block[32], const unsigned
 	memcpy(asic + 48, hash1, 32);
 	prime_blake2b_256(asic, 80, hash2);
 	{
-		uint8_t clear = (uint8_t)((32u + (unsigned)pot) > 255u ? 255u : 32u + (unsigned)pot);
+		uint8_t clear = prime_abw_clear_bits(pot);
 		unsigned k;
 		prime_xor_mask(xor_key, clear, mask);
 		for (k = 0; k < 32; k++) {

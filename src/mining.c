@@ -152,6 +152,31 @@ static void clear_pending_block(prime_conn_mining *m)
 	m->pending_coinbase = NULL;
 	m->pending_coinbase_len = 0;
 	m->have_pending_block = 0;
+	m->pending_coinbase_value = 0;
+	m->pending_finder[0] = 0;
+}
+
+static void credit_accepted_split(prime_pool *pool, uint32_t height,
+				  const unsigned char hash[32], const char *finder,
+				  uint64_t value)
+{
+	char idents[PRIME_MAX_SPLIT_OUTPUTS][PRIME_MAX_IDENTITY];
+	uint64_t amounts[PRIME_MAX_SPLIT_OUTPUTS];
+	size_t n = 0, k;
+	uint64_t paid = 0;
+
+	if (!pool) {
+		return;
+	}
+	n = prime_pool_split(pool, value, idents, amounts, PRIME_MAX_SPLIT_OUTPUTS);
+	for (k = 0; k < n; k++) {
+		paid += amounts[k];
+	}
+	prime_pool_record_block(pool, height, hash, finder, paid,
+				value > paid ? value - paid : 0);
+	if (n) {
+		prime_pool_record_owed(pool, height, hash, finder, paid, idents, amounts, n);
+	}
 }
 
 void prime_conn_mining_free(prime_conn_mining *m)
@@ -631,9 +656,20 @@ static int verify_pow(prime_conn_mining *st, uint8_t target_byte, uint32_t versi
 			(unsigned)txcount, hash_hex, pot_hex);
 		return REJECT_HIGH_HASH;
 	}
-	prime_header_v2_serialize(header, version, st->prev_hash, merkle, time_on_wire, bits,
-				  nonce, nonce2, nonce3, en16, time_offset, txcount, flags, 0, z16,
-				  (int32_t)st->height, mm_rhs);
+	{
+		const unsigned char *xk = xor_key ? xor_key : z16;
+		uint8_t xor_clear = 0;
+		unsigned k;
+		for (k = 0; k < 16; k++) {
+			if (xk[k]) {
+				xor_clear = prime_abw_clear_bits(target_byte);
+				break;
+			}
+		}
+		prime_header_v2_serialize(header, version, st->prev_hash, merkle, time_on_wire, bits,
+					  nonce, nonce2, nonce3, en16, time_offset, txcount, flags,
+					  xor_clear, xk, (int32_t)st->height, mm_rhs);
+	}
 	*coinbase = malloc(tx_len);
 	if (!*coinbase) {
 		return REJECT_OTHER;
@@ -642,6 +678,8 @@ static int verify_pow(prime_conn_mining *st, uint8_t target_byte, uint32_t versi
 	*coinbase_len = tx_len;
 	if (prime_bits_to_target(bits, net) == 0 && prime_meets_target(result, net)) {
 		*meets_network = 1;
+		fprintf(stderr, "prime: network candidate height=%u xor_clear=%u\n",
+			(unsigned)st->height, (unsigned)header[111]);
 	}
 	return 0;
 }
@@ -677,6 +715,9 @@ static int stash_or_submit_block(prime_conn_mining *st, const prime_config_opts 
 				} else {
 					prime_pool_abort_empty(opt->pool, result);
 				}
+			} else if (ok && opt && opt->pool) {
+				credit_accepted_split(opt->pool, st->height, result, finder,
+						      st->coinbase_value);
 			}
 			free(block);
 		}
@@ -693,6 +734,8 @@ static int stash_or_submit_block(prime_conn_mining *st, const prime_config_opts 
 	st->pending_coinbase_len = coinbase_len;
 	st->pending_txn_count = st->txn_count;
 	st->pending_height = st->height;
+	st->pending_coinbase_value = st->coinbase_value;
+	snprintf(st->pending_finder, sizeof st->pending_finder, "%s", finder ? finder : "");
 	*want_txns = 1;
 	fprintf(stderr, "prime: requesting %u template txns for job %u height %u\n",
 		(unsigned)st->txn_count, (unsigned)job_id, (unsigned)st->height);
@@ -883,25 +926,6 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	if (status == PRIME_SHARE_ACCEPTED && meets_network) {
 		char ident[PRIME_MAX_IDENTITY];
 		prime_identity_of((const char *)ua, ident, sizeof ident);
-		if (opt->pool && !subsidy_only) {
-			char idents[PRIME_MAX_SPLIT_OUTPUTS][PRIME_MAX_IDENTITY];
-			uint64_t amounts[PRIME_MAX_SPLIT_OUTPUTS];
-			size_t n = 0, k;
-			uint64_t paid = 0;
-			n = prime_pool_split(opt->pool, st->coinbase_value, idents, amounts,
-					     PRIME_MAX_SPLIT_OUTPUTS);
-			for (k = 0; k < n; k++) {
-				paid += amounts[k];
-			}
-			prime_pool_record_block(opt->pool, st->height, result, ident, paid,
-						st->coinbase_value > paid
-							? st->coinbase_value - paid
-							: 0);
-			if (n) {
-				prime_pool_record_owed(opt->pool, st->height, result, ident, paid,
-						       idents, amounts, n);
-			}
-		}
 		stash_or_submit_block(st, opt, job_id, subsidy_only, header, result, merkle,
 				      coinbase, coinbase_len, want_txns, ident);
 		if (*want_txns) {
@@ -1088,8 +1112,14 @@ static int on_validation(prime_conn_mining *st, const prime_config_opts *opt,
 	}
 	if (prime_serialize_block(st->pending_header, st->pending_coinbase, st->pending_coinbase_len,
 				  txns, lens, stated, &block, &block_len) == 0) {
-		prime_submit_block(opt, block, block_len, st->pending_hash);
+		int ok = prime_submit_block(opt, block, block_len, st->pending_hash) == 0;
 		free(block);
+		if (ok && opt && opt->pool) {
+			credit_accepted_split(opt->pool, st->pending_height, st->pending_hash,
+					      st->pending_finder, st->pending_coinbase_value);
+		} else if (!ok) {
+			fprintf(stderr, "prime: candidate not booked (node did not accept)\n");
+		}
 	}
 	free(txns);
 	free(lens);

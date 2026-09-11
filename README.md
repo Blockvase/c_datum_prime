@@ -55,7 +55,9 @@ Aligned with RATUM Prime (`698a236`) on the live path:
 4. Share PoW (header-v2, twelve zero bytes in the coinbase hole), replay
    guard, credit into the ledger.
 5. v3 ABW: 0xA8 notices, key in H1, mask, 0xA5 receipts, 0x8F exact ref,
-   rotate, delayed 0xA9 reveal. `--abw-disabled` if you need the old path.
+   rotate, delayed 0xA9 reveal. A submitted block header carries that XOR
+   key and clear-bits so the node hashes the same work the share did.
+   `--abw-disabled` if you need the old path.
 6. Resume tokens honored (ABW keys + coinbaser id).
 7. Block relay: nbits, `0x50 0x12`/`0x92`, merkle, `submitblock` via
    `bitcoin-cli` cookie, hex under `data/blocks/`. Parses `0x90`/`0x91`/`0x94`.
@@ -82,7 +84,9 @@ This host uses the user unit `contrib/c-datum-prime.user.service`
 
 `GET /pool.json` on the stats listener returns public pool metadata for the
 Blockvase Pool tab. It includes `schema_version`, endpoint, source URL,
-pubkey, fee, payout address types, connected DATUM clients, share-window
+pubkey, fee, payout address types, connected DATUM clients,
+`status.connected_sv1_clients` (live public Stratum V1 miners on the
+public gateway, not the Prime `--stratum-listen` DATUM pipe), share-window
 progress, blocks found, a 3-hour hashrate average (`hashrate_hs`, H/s:
 accepted share difficulty × 2^32 / 10800), and miners by window work
 percent plus that same 3-hour hashrate. `GET /shares.json` (also `/tides.json`)
@@ -103,8 +107,10 @@ and the same split amounts a later `sendmany` would pay. `links.empty`
 points at it. `status.empty_finds` / `status.empty_unsettled` count subsidy-only
 pool blocks whose coinbase paid the pool script. Prime copies the window
 just before `submitblock`, then writes `ledger.empty` only if the node
-returns null or duplicate. It does not write `ledger.owed` for that find,
-and it does not increment `blocks_found` until that accept. The later
+returns null or duplicate. A normal split find waits the same way before
+`blocks_found`, `--fee-after-first-block`, or `ledger.owed`. `--void-block HASH`
+drops the owed row and the `ledger.blocks` line so a rejected candidate
+does not keep the fee flip. The later
 `sendmany` uses that snapshot with the same split as a live coinbase
 (DATUM `--fee-bps`, SV1 2.3% with 2% rebate, 128-output cap, 546 sat
 floor). Fee sats stay on the pool script. After 100

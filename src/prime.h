@@ -239,6 +239,8 @@ typedef struct {
 	size_t pending_coinbase_len;
 	uint32_t pending_txn_count;
 	uint32_t pending_height;
+	uint64_t pending_coinbase_value;
+	char pending_finder[PRIME_MAX_IDENTITY];
 } prime_conn_mining;
 
 void prime_conn_mining_init(prime_conn_mining *m);
@@ -289,6 +291,7 @@ void prime_tagged_sha256(const char *tag, const unsigned char *data, size_t data
 			 unsigned char out[32]);
 void prime_xor_key_hash(const unsigned char xor_key[16], unsigned char out[32]);
 void prime_xor_mask(const unsigned char xor_key[16], uint8_t clear_bits, unsigned char out[32]);
+uint8_t prime_abw_clear_bits(uint8_t pot);
 int prime_header_pow_hash_abw(const unsigned char prev_block[32], const unsigned char merkle_root[32],
 			      uint32_t version, uint32_t time_on_wire, uint32_t bits,
 			      uint32_t nonce, uint32_t nonce2, uint32_t nonce3, uint32_t time_offset,
@@ -406,8 +409,10 @@ int prime_bulk_ingest(unsigned char **acc, size_t *acc_len, size_t *acc_cap, uin
 int prime_stats_start(const char *listen_addr, prime_pool *pool, const char *motd,
 		      const char *pubkey_hex, const prime_config_opts *opt,
 		      const char *datum_host, uint16_t datum_port, const char *source_url);
-void prime_stats_client_open(void);
-void prime_stats_client_close(void);
+void prime_stats_client_open(int public_stratum);
+void prime_stats_client_close(int public_stratum);
+void prime_sv1_note_connected(unsigned n);
+unsigned prime_sv1_connected_clients(void);
 
 int prime_rpc_datadir_arg(const char *datadir, char *out, size_t out_len);
 int prime_rpc_call(const char *datadir, const char *rest, char *out, size_t out_len);
@@ -424,6 +429,7 @@ int prime_pool_record_owed(prime_pool *p, uint32_t height, const unsigned char h
 			   size_t n);
 int prime_pool_settle(prime_pool *p, const unsigned char hash[32], uint64_t at);
 int prime_pool_void_owed(prime_pool *p, const unsigned char hash[32]);
+int prime_pool_void_block(prime_pool *p, const unsigned char hash[32]);
 int prime_pool_dump(prime_pool *p, FILE *out);
 int prime_pool_list_owed(prime_pool *p, FILE *out);
 int prime_pool_record_empty(prime_pool *p, uint32_t height, const unsigned char hash[32],
