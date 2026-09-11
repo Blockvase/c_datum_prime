@@ -265,7 +265,9 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			"\"hashrate_hs\":%.8g,"
 			"\"hashrate_window_sec\":%u,"
 			"\"abw_enabled\":%s,"
-			"\"require_split\":%s"
+			"\"require_split\":%s,"
+			"\"empty_finds\":%zu,"
+			"\"empty_unsettled\":%zu"
 			"},"
 			"\"window\":{"
 			"\"type\":\"work\","
@@ -281,7 +283,8 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			"\"datum_endpoint\":\"%s:%u\","
 			"\"stratum_v1\":\"stratum+tcp://%s:%u\","
 			"\"source\":\"%s\","
-			"\"shares\":\"/shares.json\""
+			"\"shares\":\"/shares.json\","
+			"\"empty\":\"/empty.json\""
 			"}"
 			"}",
 			(unsigned long long)time(NULL), (unsigned)fee_bps,
@@ -300,7 +303,9 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			(unsigned long long)blocks, prime_pool_hashrate_hs(g_pool),
 			(unsigned)PRIME_HASHRATE_WINDOW_SEC,
 			g_abw_enabled ? "true" : "false",
-			g_require_split ? "true" : "false", g_window_multiple,
+			g_require_split ? "true" : "false",
+			prime_pool_empty_count(g_pool), prime_pool_empty_unsettled(g_pool),
+			g_window_multiple,
 			(unsigned long long)g_window_floor, (unsigned long long)work,
 			(unsigned long long)window, nethash, miners, g_datum_host, (unsigned)g_datum_port,
 			g_datum_host, (unsigned)PRIME_SV1_PUBLIC_STRATUM_PORT, g_source_url);
@@ -320,6 +325,7 @@ static void *stats_thread(void *arg)
 		int want_json = 0;
 		int want_pool = 0;
 		int want_shares = 0;
+		int want_empty = 0;
 		if (c < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -331,10 +337,27 @@ static void *stats_thread(void *arg)
 			req[n] = 0;
 			want_shares = strstr(req, "GET /shares.json") || strstr(req, "GET /tides.json")
 				|| strstr(req, "GET /api/shares");
-			want_json = !want_shares && (strstr(req, "GET /stats.json")
+			want_empty = strstr(req, "GET /empty.json") || strstr(req, "GET /api/empty");
+			want_json = !want_shares && !want_empty && (strstr(req, "GET /stats.json")
 				|| strstr(req, "GET /api"));
 			want_pool = strstr(req, "GET /pool.json") || strstr(req, "GET /api/pool")
 				|| strstr(req, "GET /datum_pool");
+		}
+		if (want_empty) {
+			char *empty = malloc(2097152);
+			if (!empty) {
+				send_json(c, "{\"schema_version\":1,\"available\":false}\n");
+				close(c);
+				continue;
+			}
+			if (prime_pool_empty_json(g_pool, empty, 2097152) != 0) {
+				snprintf(empty, 2097152,
+					 "{\"schema_version\":1,\"available\":false}\n");
+			}
+			send_json(c, empty);
+			free(empty);
+			close(c);
+			continue;
 		}
 		if (want_shares) {
 			unsigned char after[32];
@@ -385,7 +408,8 @@ static void *stats_thread(void *arg)
 				 "<p>%s</p>"
 				 "<p>pool_pubkey <code>%.64s...</code></p>"
 				 "<p><a href=\"/pool.json\">Pool JSON</a> · "
-				 "<a href=\"/shares.json\">Share log</a></p>"
+				 "<a href=\"/shares.json\">Share log</a> · "
+				 "<a href=\"/empty.json\">Empty finds</a></p>"
 				 "<pre>%s</pre>"
 				 "<p>Source: <a href=\"http://pool.blockvase.com:28916/\">AGPL</a> "
 				 "translated from RATUM Prime by iohzrd</p>"

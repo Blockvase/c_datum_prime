@@ -97,7 +97,23 @@ connect to `stratum_v1_url` (`stratum+tcp://pool.blockvase.com:3333`), not
 the internal `--stratum-listen` port. Miner rows include `kind` (`datum`,
 `sv1`, or `mixed`) plus `datum_work` / `public_work`.
 `window_percent` is the payout split from window work, not the 3-hour
-hashrate. It intentionally does not include RPC credentials, private keys,
+hashrate. `GET /empty.json` (also `/api/empty`) is the frozen window for those
+subsidy-only finds: block hash (ledger and explorer order), fee, miners,
+and the same split amounts a later `sendmany` would pay. `links.empty`
+points at it. `status.empty_finds` / `status.empty_unsettled` count subsidy-only
+pool blocks whose coinbase paid the pool script. Prime copies the window
+just before `submitblock`, then writes `ledger.empty` only if the node
+returns null or duplicate. It does not write `ledger.owed` for that find,
+and it does not increment `blocks_found` until that accept. The later
+`sendmany` uses that snapshot with the same split as a live coinbase
+(DATUM `--fee-bps`, SV1 2.3% with 2% rebate, 128-output cap, 546 sat
+floor). Fee sats stay on the pool script. After 100
+confirmations, print a `sendmany` with `--empty-block HASH` (or `list`),
+then mark it paid with `--settle-empty HASH`. `--void-empty HASH` drops an
+orphaned record. The HASH is the ledger encoding (same as `--settle-block`),
+not the reversed hash on the `prime: BLOCK` line. Stop the pool process
+before these CLI flags; they open the ledger on their own. It
+intentionally does not include RPC credentials, private keys,
 or local ledger file paths.
 
 ## Build

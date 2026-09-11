@@ -426,5 +426,18 @@ int prime_pool_settle(prime_pool *p, const unsigned char hash[32], uint64_t at);
 int prime_pool_void_owed(prime_pool *p, const unsigned char hash[32]);
 int prime_pool_dump(prime_pool *p, FILE *out);
 int prime_pool_list_owed(prime_pool *p, FILE *out);
+int prime_pool_record_empty(prime_pool *p, uint32_t height, const unsigned char hash[32],
+			    const char *finder, uint64_t value);
+int prime_pool_prepare_empty(prime_pool *p, uint32_t height, const unsigned char hash[32],
+			     const char *finder, uint64_t value);
+int prime_pool_commit_empty(prime_pool *p, const unsigned char hash[32]);
+int prime_pool_abort_empty(prime_pool *p, const unsigned char hash[32]);
+int prime_pool_list_empty(prime_pool *p, FILE *out);
+int prime_pool_empty_sendmany(prime_pool *p, const unsigned char hash[32], FILE *out);
+int prime_pool_empty_json(prime_pool *p, char *out, size_t out_len);
+int prime_pool_settle_empty(prime_pool *p, const unsigned char hash[32], uint64_t at);
+int prime_pool_void_empty(prime_pool *p, const unsigned char hash[32]);
+size_t prime_pool_empty_count(prime_pool *p);
+size_t prime_pool_empty_unsettled(prime_pool *p);
 
 #endif

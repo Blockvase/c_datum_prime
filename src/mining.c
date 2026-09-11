@@ -162,6 +162,26 @@ void prime_conn_mining_free(prime_conn_mining *m)
 	memset(m, 0, sizeof *m);
 }
 
+static int submitblock_result_ok(const char *s)
+{
+	char buf[128];
+	size_t n = 0;
+	if (!s) {
+		return 0;
+	}
+	while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+		s++;
+	}
+	if (*s == '"' || *s == '\'') {
+		s++;
+	}
+	while (*s && *s != '"' && *s != '\'' && *s != '\n' && *s != '\r' && n + 1 < sizeof buf) {
+		buf[n++] = (char)*s++;
+	}
+	buf[n] = 0;
+	return buf[0] == 0 || strcmp(buf, "null") == 0 || strcmp(buf, "duplicate") == 0;
+}
+
 int prime_submit_block(const prime_config_opts *opt, const unsigned char *block, size_t block_len,
 		       const unsigned char hash[32])
 {
@@ -172,6 +192,7 @@ int prime_submit_block(const prime_config_opts *opt, const unsigned char *block,
 	FILE *f;
 	int i;
 	int rc = -1;
+	int wrote_hex = 0;
 
 	for (i = 0; i < 32; i++) {
 		rev[i] = hash[31 - i];
@@ -194,33 +215,50 @@ int prime_submit_block(const prime_config_opts *opt, const unsigned char *block,
 						fwrite(hex, 1, block_len * 2, f);
 						fclose(f);
 						fprintf(stderr, "prime: wrote %s\n", path);
-						rc = 0;
+						wrote_hex = 1;
 					}
 				}
 			}
 		}
 	}
 	if (opt && opt->bitcoin_datadir && opt->bitcoin_datadir[0]) {
-		int fds[2];
+		int pin[2] = { -1, -1 };
+		int pout[2] = { -1, -1 };
 		pid_t pid;
-		if (pipe(fds) != 0) {
+		char reply[256];
+		size_t got = 0;
+		int st = 0;
+		if (pipe(pin) != 0 || pipe(pout) != 0) {
 			fprintf(stderr, "prime: submitblock pipe failed: %s\n", strerror(errno));
+			if (pin[0] >= 0) {
+				close(pin[0]);
+				close(pin[1]);
+			}
+			if (pout[0] >= 0) {
+				close(pout[0]);
+				close(pout[1]);
+			}
 			free(hex);
-			return rc;
+			return -1;
 		}
 		pid = fork();
 		if (pid < 0) {
 			fprintf(stderr, "prime: submitblock fork failed: %s\n", strerror(errno));
-			close(fds[0]);
-			close(fds[1]);
+			close(pin[0]);
+			close(pin[1]);
+			close(pout[0]);
+			close(pout[1]);
 			free(hex);
-			return rc;
+			return -1;
 		}
 		if (pid == 0) {
 			char darg[600];
-			dup2(fds[0], STDIN_FILENO);
-			close(fds[0]);
-			close(fds[1]);
+			dup2(pin[0], STDIN_FILENO);
+			dup2(pout[1], STDOUT_FILENO);
+			close(pin[0]);
+			close(pin[1]);
+			close(pout[0]);
+			close(pout[1]);
 			if (prime_rpc_datadir_arg(opt->bitcoin_datadir, darg, sizeof darg) != 0) {
 				_exit(127);
 			}
@@ -228,7 +266,8 @@ int prime_submit_block(const prime_config_opts *opt, const unsigned char *block,
 			       (char *)NULL);
 			_exit(127);
 		}
-		close(fds[0]);
+		close(pin[0]);
+		close(pout[1]);
 		if (!hex) {
 			hex = malloc(block_len * 2 + 1);
 			if (hex) {
@@ -236,22 +275,35 @@ int prime_submit_block(const prime_config_opts *opt, const unsigned char *block,
 			}
 		}
 		if (hex) {
-			if (write(fds[1], hex, block_len * 2) != (ssize_t)(block_len * 2)
-			    || write(fds[1], "\n", 1) != 1) {
+			if (write(pin[1], hex, block_len * 2) != (ssize_t)(block_len * 2)
+			    || write(pin[1], "\n", 1) != 1) {
 				fprintf(stderr, "prime: submitblock write failed\n");
 			}
 		}
-		close(fds[1]);
-		{
-			int st = 0;
-			if (waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0) {
-				fprintf(stderr, "prime: submitblock accepted %s\n", hash_disp);
-				rc = 0;
-			} else {
-				fprintf(stderr, "prime: submitblock failed for %s (exit %d)\n",
-					hash_disp, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+		close(pin[1]);
+		for (;;) {
+			ssize_t nr = read(pout[0], reply + got, sizeof reply - 1 - got);
+			if (nr <= 0) {
+				break;
+			}
+			got += (size_t)nr;
+			if (got >= sizeof reply - 1) {
+				break;
 			}
 		}
+		reply[got] = 0;
+		close(pout[0]);
+		if (waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0
+		    && submitblock_result_ok(reply)) {
+			fprintf(stderr, "prime: submitblock accepted %s\n", hash_disp);
+			rc = 0;
+		} else {
+			fprintf(stderr, "prime: submitblock failed for %s (exit %d reply %s)\n",
+				hash_disp, WIFEXITED(st) ? WEXITSTATUS(st) : -1, reply);
+			rc = -1;
+		}
+	} else if (wrote_hex) {
+		rc = 0;
 	}
 	free(hex);
 	return rc;
@@ -598,7 +650,8 @@ static int stash_or_submit_block(prime_conn_mining *st, const prime_config_opts 
 				 uint8_t job_id, int subsidy_only,
 				 const unsigned char header[PRIME_HEADER_V2_SIZE],
 				 const unsigned char result[32], const unsigned char merkle[32],
-				 unsigned char *coinbase, size_t coinbase_len, int *want_txns)
+				 unsigned char *coinbase, size_t coinbase_len, int *want_txns,
+				 const char *finder)
 {
 	unsigned char *block = NULL;
 	size_t block_len = 0;
@@ -607,7 +660,24 @@ static int stash_or_submit_block(prime_conn_mining *st, const prime_config_opts 
 	if (subsidy_only || st->txn_count == 0) {
 		if (prime_serialize_block(header, coinbase, coinbase_len, NULL, NULL, 0,
 					  &block, &block_len) == 0) {
-			prime_submit_block(opt, block, block_len, result);
+			int ok;
+			if (subsidy_only && opt && opt->pool) {
+				if (prime_pool_prepare_empty(opt->pool, st->height, result, finder,
+							     st->coinbase_value) != 0) {
+					fprintf(stderr,
+						"prime: empty snapshot not stored (32 unsettled finds)\n");
+				}
+			}
+			ok = prime_submit_block(opt, block, block_len, result) == 0;
+			if (subsidy_only && opt && opt->pool) {
+				if (ok) {
+					prime_pool_record_block(opt->pool, st->height, result,
+								finder, 0, st->coinbase_value);
+					prime_pool_commit_empty(opt->pool, result);
+				} else {
+					prime_pool_abort_empty(opt->pool, result);
+				}
+			}
 			free(block);
 		}
 		free(coinbase);
@@ -813,7 +883,7 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	if (status == PRIME_SHARE_ACCEPTED && meets_network) {
 		char ident[PRIME_MAX_IDENTITY];
 		prime_identity_of((const char *)ua, ident, sizeof ident);
-		if (opt->pool) {
+		if (opt->pool && !subsidy_only) {
 			char idents[PRIME_MAX_SPLIT_OUTPUTS][PRIME_MAX_IDENTITY];
 			uint64_t amounts[PRIME_MAX_SPLIT_OUTPUTS];
 			size_t n = 0, k;
@@ -833,7 +903,7 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 			}
 		}
 		stash_or_submit_block(st, opt, job_id, subsidy_only, header, result, merkle,
-				      coinbase, coinbase_len, want_txns);
+				      coinbase, coinbase_len, want_txns, ident);
 		if (*want_txns) {
 			*txn_job = job_id;
 		}

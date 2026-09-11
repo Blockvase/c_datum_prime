@@ -466,6 +466,7 @@ static void usage(const char *argv0)
 		"          [--window N] [--window-floor N] [--abw-disabled] [--abw-reveal-after N]\n"
 		"          [--no-require-split] [--no-bulk]\n"
 		"          [--dump-ledger] [--settle-block HASH|list] [--void-block HASH]\n"
+		"          [--empty-block HASH|list] [--settle-empty HASH] [--void-empty HASH]\n"
 		"Default listen is 127.0.0.1:28915. Do not bind a public address until\n"
 		"you intend to offer source (AGPL section 13).\n",
 		argv0);
@@ -501,6 +502,9 @@ int main(int argc, char **argv)
 	int dump_ledger = 0;
 	const char *settle_arg = NULL;
 	const char *void_arg = NULL;
+	const char *empty_arg = NULL;
+	const char *settle_empty_arg = NULL;
+	const char *void_empty_arg = NULL;
 	int i;
 	char host[128];
 	char bitcoin_home[512];
@@ -574,6 +578,12 @@ int main(int argc, char **argv)
 			settle_arg = argv[++i];
 		} else if (strcmp(argv[i], "--void-block") == 0 && i + 1 < argc) {
 			void_arg = argv[++i];
+		} else if (strcmp(argv[i], "--empty-block") == 0 && i + 1 < argc) {
+			empty_arg = argv[++i];
+		} else if (strcmp(argv[i], "--settle-empty") == 0 && i + 1 < argc) {
+			settle_empty_arg = argv[++i];
+		} else if (strcmp(argv[i], "--void-empty") == 0 && i + 1 < argc) {
+			void_empty_arg = argv[++i];
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
 			usage(argv[0]);
 			return 0;
@@ -705,6 +715,50 @@ int main(int argc, char **argv)
 			rc = 2;
 		} else if (prime_pool_void_owed(opt.pool, hash) != 0) {
 			fprintf(stderr, "no owed block under %s\n", void_arg);
+			rc = 2;
+		}
+		prime_pool_close(opt.pool);
+		return rc;
+	}
+	if (empty_arg) {
+		int rc = 0;
+		if (strcmp(empty_arg, "list") == 0) {
+			prime_pool_list_empty(opt.pool, stdout);
+		} else {
+			unsigned char hash[32];
+			if (prime_hex_decode(empty_arg, hash, 32) != 0) {
+				fprintf(stderr, "--empty-block takes 64 hex digits or list\n");
+				rc = 2;
+			} else if (prime_pool_empty_sendmany(opt.pool, hash, stdout) != 0) {
+				fprintf(stderr, "no empty find under %s; --empty-block list prints them\n",
+					empty_arg);
+				rc = 2;
+			}
+		}
+		prime_pool_close(opt.pool);
+		return rc;
+	}
+	if (settle_empty_arg) {
+		unsigned char hash[32];
+		int rc = 0;
+		if (prime_hex_decode(settle_empty_arg, hash, 32) != 0) {
+			fprintf(stderr, "--settle-empty takes 64 hex digits\n");
+			rc = 2;
+		} else if (prime_pool_settle_empty(opt.pool, hash, (uint64_t)time(NULL)) != 0) {
+			fprintf(stderr, "no empty find under %s\n", settle_empty_arg);
+			rc = 2;
+		}
+		prime_pool_close(opt.pool);
+		return rc;
+	}
+	if (void_empty_arg) {
+		unsigned char hash[32];
+		int rc = 0;
+		if (prime_hex_decode(void_empty_arg, hash, 32) != 0) {
+			fprintf(stderr, "--void-empty takes 64 hex digits\n");
+			rc = 2;
+		} else if (prime_pool_void_empty(opt.pool, hash) != 0) {
+			fprintf(stderr, "no empty find under %s\n", void_empty_arg);
 			rc = 2;
 		}
 		prime_pool_close(opt.pool);

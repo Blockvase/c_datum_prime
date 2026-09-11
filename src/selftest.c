@@ -1104,6 +1104,319 @@ static int test_nethash_cap(void)
 	return 0;
 }
 
+static int test_empty_find_snapshot(void)
+{
+	prime_pool *p;
+	const char *path = "/tmp/c-datum-prime-selftest-empty";
+	const char *fee_path = "/tmp/c-datum-prime-selftest-empty-fee";
+	unsigned char hash[32];
+	char idents[4][PRIME_MAX_IDENTITY];
+	uint64_t amounts[4];
+	size_t n;
+	FILE *cap;
+	char buf[4096];
+
+	remove("/tmp/c-datum-prime-selftest-empty.shares");
+	remove("/tmp/c-datum-prime-selftest-empty.window");
+	remove("/tmp/c-datum-prime-selftest-empty.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty.owed");
+	remove("/tmp/c-datum-prime-selftest-empty.empty");
+	p = prime_pool_open(path, 1000000, 546, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: empty snapshot open failed\n");
+		return -1;
+	}
+	memset(hash, 1, sizeof hash);
+	if (prime_pool_record_share(p, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65536, hash,
+				    "") != 0) {
+		fprintf(stderr, "selftest: empty snapshot alice share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 2, sizeof hash);
+	if (prime_pool_record_share(p, "bc1qbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 65536, hash,
+				    "") != 0) {
+		fprintf(stderr, "selftest: empty snapshot bob share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 9, sizeof hash);
+	if (prime_pool_record_empty(p, 100, hash, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				    100000000) != 0
+	    || prime_pool_empty_count(p) != 1
+	    || prime_pool_empty_unsettled(p) != 1) {
+		fprintf(stderr, "selftest: empty snapshot record failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	p = prime_pool_open(path, 1000000, 546, 0);
+	if (!p || prime_pool_empty_count(p) != 1 || prime_pool_empty_unsettled(p) != 1) {
+		fprintf(stderr, "selftest: empty snapshot did not reload\n");
+		if (p) {
+			prime_pool_close(p);
+		}
+		return -1;
+	}
+	{
+		char ej[4096];
+		if (prime_pool_empty_json(p, ej, sizeof ej) != 0
+		    || !strstr(ej, "\"empty_finds\":1")
+		    || !strstr(ej, "\"empty_unsettled\":1")
+		    || !strstr(ej, "\"settled\":false")
+		    || !strstr(ej, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		    || !strstr(ej, "\"payouts\"")
+		    || !strstr(ej, "\"leftover_sats\"")) {
+			fprintf(stderr, "selftest: empty json missing snapshot\n");
+			prime_pool_close(p);
+			return -1;
+		}
+	}
+	n = prime_pool_split(p, 100000000, idents, amounts, 4);
+	if (n < 2) {
+		fprintf(stderr, "selftest: empty snapshot split n=%zu\n", n);
+		prime_pool_close(p);
+		return -1;
+	}
+	cap = fopen("/tmp/c-datum-prime-selftest-empty.out", "w+");
+	if (!cap || prime_pool_empty_sendmany(p, hash, cap) != 0) {
+		fprintf(stderr, "selftest: empty sendmany failed\n");
+		if (cap) {
+			fclose(cap);
+		}
+		prime_pool_close(p);
+		return -1;
+	}
+	rewind(cap);
+	if (!fread(buf, 1, sizeof buf - 1, cap)) {
+		buf[0] = 0;
+	} else {
+		buf[sizeof buf - 1] = 0;
+	}
+	fclose(cap);
+	if (!strstr(buf, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	    || !strstr(buf, "bc1qbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	    || !strstr(buf, "sendmany")
+	    || !strstr(buf, "0.50000000")) {
+		fprintf(stderr, "selftest: empty sendmany missing alice/bob split\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	if (prime_pool_settle_empty(p, hash, 123) != 0 || prime_pool_empty_unsettled(p) != 0) {
+		fprintf(stderr, "selftest: empty settle failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	if (prime_pool_void_empty(p, hash) != 0 || prime_pool_empty_count(p) != 0) {
+		fprintf(stderr, "selftest: empty void failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 4, sizeof hash);
+	if (prime_pool_prepare_empty(p, 101, hash, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				     100000000) != 0
+	    || prime_pool_empty_count(p) != 0) {
+		fprintf(stderr, "selftest: empty prepare should stay pending\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	p = prime_pool_open(path, 1000000, 546, 0);
+	if (!p || prime_pool_empty_count(p) != 0) {
+		fprintf(stderr, "selftest: empty prepare leaked to disk\n");
+		if (p) {
+			prime_pool_close(p);
+		}
+		return -1;
+	}
+	if (prime_pool_prepare_empty(p, 101, hash, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				     100000000) != 0
+	    || prime_pool_commit_empty(p, hash) != 0
+	    || prime_pool_empty_count(p) != 1) {
+		fprintf(stderr, "selftest: empty commit failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 5, sizeof hash);
+	if (prime_pool_prepare_empty(p, 102, hash, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				     100000000) != 0
+	    || prime_pool_abort_empty(p, hash) != 0
+	    || prime_pool_empty_count(p) != 1) {
+		fprintf(stderr, "selftest: empty abort failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	p = prime_pool_open(path, 1000000, 546, 0);
+	if (!p || prime_pool_empty_count(p) != 1) {
+		fprintf(stderr, "selftest: empty commit did not persist\n");
+		if (p) {
+			prime_pool_close(p);
+		}
+		return -1;
+	}
+	prime_pool_close(p);
+	remove("/tmp/c-datum-prime-selftest-empty.shares");
+	remove("/tmp/c-datum-prime-selftest-empty.window");
+	remove("/tmp/c-datum-prime-selftest-empty.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty.owed");
+	remove("/tmp/c-datum-prime-selftest-empty.empty");
+	remove("/tmp/c-datum-prime-selftest-empty.out");
+
+	remove("/tmp/c-datum-prime-selftest-empty-fee.shares");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.window");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.owed");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.empty");
+	p = prime_pool_open(fee_path, 1000000, 546, 21);
+	if (!p) {
+		fprintf(stderr, "selftest: empty fee open failed\n");
+		return -1;
+	}
+	memset(hash, 1, sizeof hash);
+	if (prime_pool_record_share(p, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65536, hash,
+				    "") != 0) {
+		fprintf(stderr, "selftest: empty fee alice share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 2, sizeof hash);
+	if (prime_pool_record_share(p, "bc1qbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 65536, hash,
+				    PRIME_SV1_TAG) != 0) {
+		fprintf(stderr, "selftest: empty fee bob share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	memset(hash, 9, sizeof hash);
+	n = prime_pool_split(p, 100000000, idents, amounts, 4);
+	if (prime_pool_record_empty(p, 100, hash, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				    100000000) != 0) {
+		fprintf(stderr, "selftest: empty fee record failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	prime_pool_close(p);
+	p = prime_pool_open(fee_path, 1000000, 546, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: empty fee reload failed\n");
+		return -1;
+	}
+	cap = fopen("/tmp/c-datum-prime-selftest-empty-fee.out", "w+");
+	if (!cap || prime_pool_empty_sendmany(p, hash, cap) != 0) {
+		fprintf(stderr, "selftest: empty fee sendmany failed\n");
+		if (cap) {
+			fclose(cap);
+		}
+		prime_pool_close(p);
+		return -1;
+	}
+	rewind(cap);
+	if (!fread(buf, 1, sizeof buf - 1, cap)) {
+		buf[0] = 0;
+	} else {
+		buf[sizeof buf - 1] = 0;
+	}
+	fclose(cap);
+	{
+		char want_a[32], want_b[32];
+		uint64_t alice = 0, bob = 0;
+		size_t i;
+		for (i = 0; i < n; i++) {
+			if (strstr(idents[i], "aaaa")) {
+				alice = amounts[i];
+			}
+			if (strstr(idents[i], "bbbb")) {
+				bob = amounts[i];
+			}
+		}
+		snprintf(want_a, sizeof want_a, "%llu.%08llu",
+			 (unsigned long long)(alice / 100000000ull),
+			 (unsigned long long)(alice % 100000000ull));
+		snprintf(want_b, sizeof want_b, "%llu.%08llu",
+			 (unsigned long long)(bob / 100000000ull),
+			 (unsigned long long)(bob % 100000000ull));
+		if (!alice || !bob || !strstr(buf, want_a) || !strstr(buf, want_b)
+		    || strstr(buf, "0.50000000")) {
+			fprintf(stderr, "selftest: empty fee sendmany ignored split %s %s\n",
+				want_a, want_b);
+			prime_pool_close(p);
+			return -1;
+		}
+	}
+	prime_pool_close(p);
+	remove("/tmp/c-datum-prime-selftest-empty-full.shares");
+	remove("/tmp/c-datum-prime-selftest-empty-full.window");
+	remove("/tmp/c-datum-prime-selftest-empty-full.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty-full.owed");
+	remove("/tmp/c-datum-prime-selftest-empty-full.empty");
+	p = prime_pool_open("/tmp/c-datum-prime-selftest-empty-full", 1000000, 546, 0);
+	if (!p) {
+		fprintf(stderr, "selftest: empty full open failed\n");
+		return -1;
+	}
+	memset(hash, 1, sizeof hash);
+	if (prime_pool_record_share(p, "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65536, hash,
+				    "") != 0) {
+		fprintf(stderr, "selftest: empty full share failed\n");
+		prime_pool_close(p);
+		return -1;
+	}
+	{
+		unsigned char first[32];
+		unsigned char extra[32];
+		size_t i;
+		memset(first, 0, sizeof first);
+		first[0] = 1;
+		for (i = 0; i < 32; i++) {
+			unsigned char h[32];
+			memset(h, 0, sizeof h);
+			h[0] = (unsigned char)(i + 1);
+			if (prime_pool_record_empty(p, (uint32_t)(200 + i), h,
+						    "bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						    100000000) != 0) {
+				fprintf(stderr, "selftest: empty full record %zu failed\n", i);
+				prime_pool_close(p);
+				return -1;
+			}
+		}
+		if (prime_pool_empty_count(p) != 32) {
+			fprintf(stderr, "selftest: empty full count %zu\n",
+				prime_pool_empty_count(p));
+			prime_pool_close(p);
+			return -1;
+		}
+		memset(extra, 0xaa, sizeof extra);
+		cap = fopen("/dev/null", "w");
+		if (!cap
+		    || prime_pool_prepare_empty(p, 300, extra,
+						"bc1qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						100000000) == 0
+		    || prime_pool_empty_count(p) != 32
+		    || prime_pool_empty_sendmany(p, first, cap) != 0) {
+			fprintf(stderr, "selftest: empty prepare evicted an unsettled find\n");
+			if (cap) {
+				fclose(cap);
+			}
+			prime_pool_close(p);
+			return -1;
+		}
+		fclose(cap);
+	}
+	prime_pool_close(p);
+	remove("/tmp/c-datum-prime-selftest-empty-full.shares");
+	remove("/tmp/c-datum-prime-selftest-empty-full.window");
+	remove("/tmp/c-datum-prime-selftest-empty-full.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty-full.owed");
+	remove("/tmp/c-datum-prime-selftest-empty-full.empty");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.shares");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.window");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.blocks");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.owed");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.empty");
+	remove("/tmp/c-datum-prime-selftest-empty-fee.out");
+	return 0;
+}
+
 int prime_selftest(void)
 {
 	if (sodium_init() < 0) {
@@ -1121,7 +1434,8 @@ int prime_selftest(void)
 	    || test_fee_after_first_block() != 0
 	    || test_sv1_rebate_split() != 0
 	    || test_window_holds_until_difficulty() != 0
-	    || test_nethash_cap() != 0) {
+	    || test_nethash_cap() != 0
+	    || test_empty_find_snapshot() != 0) {
 		fprintf(stderr, "selftest: FAILED\n");
 		return 1;
 	}
