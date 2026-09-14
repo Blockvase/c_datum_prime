@@ -2,7 +2,7 @@
 
 Public repo: [github.com/Blockvase/c_datum_prime](https://github.com/Blockvase/c_datum_prime)
 
-A C translation of [RATUM Prime](https://github.com/iohzrd/ratum) by iohzrd.
+A C port of [RATUM Prime](https://github.com/iohzrd/ratum) by iohzrd.
 License: GNU Affero GPL v3 or later. See `LICENSE` and `NOTICE`.
 
 This repo is **only the DATUM pool server (Prime)**. It is not a full mining
