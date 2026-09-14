@@ -224,6 +224,8 @@ typedef struct {
 	prime_split_rec splits[16];
 	size_t nsplits;
 	unsigned char last_hash[32];
+	unsigned char last_raw_le[32];
+	int have_last_raw_le;
 	int last_accepted;
 	int last_candidate;
 	int public_stratum;
@@ -388,6 +390,8 @@ int prime_abw_key(const prime_abw *a, uint8_t slot, unsigned char key[16]);
 int prime_abw_encode_notice(const prime_abw *a, uint8_t slot, int active,
 			    unsigned char **out, size_t *out_len);
 int prime_abw_encode_notices(const prime_abw *a, unsigned char ***out, size_t **lens, size_t *n);
+void prime_abw_gateway_proof(const unsigned char result[32], const unsigned char xor_key[16],
+			     uint8_t pot, unsigned char raw_le[32]);
 int prime_abw_encode_receipt(uint8_t slot, const unsigned char raw_le[32],
 			     unsigned char **out, size_t *out_len);
 int prime_abw_encode_reveal(uint8_t slot, const unsigned char key[16],

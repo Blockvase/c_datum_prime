@@ -1537,6 +1537,26 @@ static int test_abw_submit_header(void)
 		fprintf(stderr, "selftest: zeroing the xor key must change the pow hash\n");
 		return -1;
 	}
+	{
+		unsigned char mask[32], hash2[32], proof[32], expect[32], old_buggy[32];
+		prime_xor_mask(key, clear, mask);
+		for (i = 0; i < 32; i++) {
+			hash2[i] = (unsigned char)(hashed[i] ^ mask[i]);
+		}
+		for (i = 0; i < 32; i++) {
+			expect[i] = hash2[31 - i];
+			old_buggy[i] = hashed[31 - i];
+		}
+		prime_abw_gateway_proof(hashed, key, pot, proof);
+		if (memcmp(proof, expect, 32) != 0) {
+			fprintf(stderr, "selftest: abw receipt proof must be reversed unmasked hash2\n");
+			return -1;
+		}
+		if (memcmp(proof, old_buggy, 32) == 0) {
+			fprintf(stderr, "selftest: receipt must not be the reversed masked hash\n");
+			return -1;
+		}
+	}
 	return 0;
 }
 

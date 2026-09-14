@@ -766,11 +766,14 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	unsigned char *coinbase = NULL;
 	size_t coinbase_len = 0;
 	int meets_network = 0;
+	unsigned char xor_key[16];
 
 	*want_txns = 0;
 	*txn_job = 0;
 	st->last_accepted = 0;
 	st->last_candidate = 0;
+	st->have_last_raw_le = 0;
+	memset(xor_key, 0, sizeof xor_key);
 
 	if (plain_len < 18 || plain[0] != PRIME_MINING_SUBMIT_POW) {
 		return encode_share_resp(PRIME_SHARE_REJECTED, REJECT_OTHER, 0, 0xff, 0,
@@ -876,8 +879,6 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 		reason = REJECT_BLAKE;
 	}
 	if (!reason) {
-		unsigned char xor_key[16];
-		memset(xor_key, 0, sizeof xor_key);
 		if (st->abw_on) {
 			uint8_t slot = st->have_abw_slot ? st->abw_slot : st->abw.active;
 			if (prime_abw_key(&st->abw, slot, xor_key) != 0) {
@@ -910,6 +911,8 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	st->last_candidate = st->last_accepted && meets_network;
 	if (st->last_accepted) {
 		memcpy(st->last_hash, result, 32);
+		prime_abw_gateway_proof(result, xor_key, target_byte, st->last_raw_le);
+		st->have_last_raw_le = 1;
 	}
 	fprintf(stderr, "[%s] share job=%u user=%.48s diff=%llu %s%s%s reason=%u\n",
 		peer && peer[0] ? peer : "?", job_id, (const char *)ua,
@@ -937,13 +940,9 @@ static int on_share(prime_conn_mining *st, const prime_config_opts *opt,
 	}
 	free(coinbase);
 	(void)ntime;
-	if (status == PRIME_SHARE_ACCEPTED && st->abw_on) {
-		unsigned char raw_le[32];
-		int i;
-		for (i = 0; i < 32; i++) {
-			raw_le[i] = result[31 - i];
-		}
-		return encode_share_resp_abw(status, reason, nonce, target_byte, job_id, raw_le,
+	if (status == PRIME_SHARE_ACCEPTED && st->abw_on && st->have_last_raw_le) {
+		return encode_share_resp_abw(status, reason, nonce, target_byte, job_id,
+					     st->last_raw_le,
 					     st->have_abw_slot ? st->abw_slot : st->abw.active,
 					     payload, payload_len);
 	}
@@ -1211,17 +1210,13 @@ int prime_handle_mining(prime_session *s, prime_conn_mining *st, const prime_con
 		}
 		rc = prime_session_encrypt(s, PRIME_CMD_MINING, payload, payload_len, false, wire, wire_len);
 		if (rc == 0 && st->last_accepted && st->abw_on) {
-			unsigned char raw_le[32], *extra = NULL;
+			unsigned char *extra = NULL;
 			size_t extra_len = 0, k;
 			unsigned char *rot = NULL, **revs = NULL;
 			size_t rot_len = 0, *rlens = NULL, rn = 0;
-			int i;
-			for (i = 0; i < 32; i++) {
-				raw_le[i] = st->last_hash[31 - i];
-			}
-			if (st->last_candidate
+			if (st->last_candidate && st->have_last_raw_le
 			    && prime_abw_encode_receipt(st->have_abw_slot ? st->abw_slot : st->abw.active,
-							raw_le, &extra, &extra_len) == 0
+							st->last_raw_le, &extra, &extra_len) == 0
 			    && extra) {
 				unsigned char *rw = NULL;
 				size_t rwl = 0;

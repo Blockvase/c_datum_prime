@@ -43,6 +43,29 @@ void prime_xor_mask(const unsigned char xor_key[16], uint8_t clear_bits, unsigne
 	}
 }
 
+/* CONVOY retains proofs as datum_blake2b_pow_hash_le with a zero mask: the
+ * unmasked BLAKE2b output, reversed. RATUM receipts that as raw_hash_le.
+ * `result` is hash2 XOR the share mask, so undo the mask first. */
+void prime_abw_gateway_proof(const unsigned char result[32], const unsigned char xor_key[16],
+			     uint8_t pot, unsigned char raw_le[32])
+{
+	unsigned char mask[32], zero[16];
+	const unsigned char *key = xor_key;
+	int k;
+
+	if (!result || !raw_le) {
+		return;
+	}
+	if (!key) {
+		memset(zero, 0, sizeof zero);
+		key = zero;
+	}
+	prime_xor_mask(key, prime_abw_clear_bits(pot), mask);
+	for (k = 0; k < 32; k++) {
+		raw_le[k] = (unsigned char)(result[31 - k] ^ mask[31 - k]);
+	}
+}
+
 static void seed_slot(prime_abw *a, uint8_t slot)
 {
 	randombytes_buf(a->keys[slot], 16);
