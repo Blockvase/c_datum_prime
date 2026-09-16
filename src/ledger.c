@@ -1999,6 +1999,234 @@ int prime_pool_empty_json(prime_pool *p, char *out, size_t out_len)
 	return 0;
 }
 
+static int finds_emit_row(char **cur, size_t *left, int comma, uint32_t height,
+			  const unsigned char hash[32], uint64_t found_at, uint64_t value,
+			  uint16_t fee_bps, uint64_t min_payout, uint64_t settled_at,
+			  const char *finder, const char ents[][PRIME_MAX_IDENTITY],
+			  const uint64_t *amounts, size_t nent, uint64_t leftover_sats,
+			  int leftover_fixed)
+{
+	char hex[65], block[65];
+	unsigned char rev[32];
+	size_t j, k;
+	uint64_t leftover = leftover_fixed ? leftover_sats : value;
+	int w, first_m = 1, first_p = 1;
+
+	for (k = 0; k < 32; k++) {
+		rev[k] = hash[31 - k];
+	}
+	prime_hex_encode(hash, 32, hex, sizeof hex);
+	prime_hex_encode(rev, 32, block, sizeof block);
+	w = snprintf(*cur, *left,
+		     "%s{\"height\":%u,\"hash\":\"%s\",\"block\":\"%s\",\"found_at\":%llu,"
+		     "\"value\":%llu,\"fee_bps\":%u,\"min_payout_sats\":%llu,"
+		     "\"settled\":%s,\"settled_at\":%llu,\"finder\":\"",
+		     comma ? "," : "", height, hex, block, (unsigned long long)found_at,
+		     (unsigned long long)value, (unsigned)fee_bps,
+		     (unsigned long long)min_payout, settled_at ? "true" : "false",
+		     (unsigned long long)settled_at);
+	if (w < 0 || (size_t)w >= *left) {
+		return -1;
+	}
+	*cur += w;
+	*left -= (size_t)w;
+	json_escape_append(cur, left, finder ? finder : "");
+	w = snprintf(*cur, *left, "\",\"miners\":[");
+	if (w < 0 || (size_t)w >= *left) {
+		return -1;
+	}
+	*cur += w;
+	*left -= (size_t)w;
+	for (j = 0; j < nent; j++) {
+		double pct = value ? ((double)amounts[j] * 100.0 / (double)value) : 0.0;
+		w = snprintf(*cur, *left, "%s{\"id\":\"", first_m ? "" : ",");
+		if (w < 0 || (size_t)w >= *left) {
+			return -1;
+		}
+		*cur += w;
+		*left -= (size_t)w;
+		json_escape_append(cur, left, ents[j]);
+		w = snprintf(*cur, *left,
+			     "\",\"work\":0,\"datum_work\":0,\"public_work\":0,"
+			     "\"kind\":\"datum\",\"window_percent\":%.6f}",
+			     pct);
+		if (w < 0 || (size_t)w >= *left) {
+			return -1;
+		}
+		*cur += w;
+		*left -= (size_t)w;
+		first_m = 0;
+	}
+	w = snprintf(*cur, *left, "],\"payouts\":[");
+	if (w < 0 || (size_t)w >= *left) {
+		return -1;
+	}
+	*cur += w;
+	*left -= (size_t)w;
+	for (j = 0; j < nent; j++) {
+		uint64_t sats = amounts[j];
+		if (!sats) {
+			continue;
+		}
+		if (!leftover_fixed) {
+			if (sats > leftover) {
+				sats = leftover;
+			}
+			leftover -= sats;
+		}
+		w = snprintf(*cur, *left, "%s{\"id\":\"", first_p ? "" : ",");
+		if (w < 0 || (size_t)w >= *left) {
+			return -1;
+		}
+		*cur += w;
+		*left -= (size_t)w;
+		json_escape_append(cur, left, ents[j]);
+		w = snprintf(*cur, *left, "\",\"sats\":%llu}", (unsigned long long)sats);
+		if (w < 0 || (size_t)w >= *left) {
+			return -1;
+		}
+		*cur += w;
+		*left -= (size_t)w;
+		first_p = 0;
+	}
+	w = snprintf(*cur, *left, "],\"leftover_sats\":%llu}",
+		     (unsigned long long)(leftover_fixed ? leftover_sats : leftover));
+	if (w < 0 || (size_t)w >= *left) {
+		return -1;
+	}
+	*cur += w;
+	*left -= (size_t)w;
+	return 0;
+}
+
+int prime_pool_finds_json(prime_pool *p, char *out, size_t out_len)
+{
+	enum { PRIME_MAX_BLOCK_SCAN = 1024 };
+	struct {
+		unsigned char hash[32];
+		char finder[PRIME_MAX_IDENTITY];
+		uint32_t height;
+		uint64_t split;
+		uint64_t pool;
+		int in_owed;
+	} brows[PRIME_MAX_BLOCK_SCAN];
+	size_t i, nb = 0;
+	int w, first = 1;
+	char *cur;
+	size_t left;
+	char bpath[600];
+	FILE *bf;
+
+	if (!p || !out || out_len < 64) {
+		return -1;
+	}
+	pthread_mutex_lock(&p->mu);
+	snprintf(bpath, sizeof bpath, "%s.blocks", p->path);
+	bf = fopen(bpath, "r");
+	if (bf) {
+		char line[512];
+		while (fgets(line, sizeof line, bf) && nb < PRIME_MAX_BLOCK_SCAN) {
+			unsigned height = 0;
+			char hex[65], finder[PRIME_MAX_IDENTITY];
+			unsigned long long split = 0, pool_left = 0;
+			char *s = line;
+			int have = 0;
+
+			while (*s == ' ' || *s == '\t') {
+				s++;
+			}
+			if (*s == 0 || *s == '\n' || *s == '#') {
+				continue;
+			}
+			finder[0] = 0;
+			if (sscanf(s, "%u %64s %127s split=%llu pool=%llu", &height, hex, finder,
+				   &split, &pool_left) == 5) {
+				have = 1;
+			} else if (sscanf(s, "%u %64s", &height, hex) == 2) {
+				char *sp = strstr(s, " split=");
+				char *pp = strstr(s, " pool=");
+				if (sp) {
+					sscanf(sp, " split=%llu", &split);
+				}
+				if (pp) {
+					sscanf(pp, " pool=%llu", &pool_left);
+				}
+				have = 1;
+			}
+			if (!have || prime_hex_decode(hex, brows[nb].hash, 32) != 0) {
+				continue;
+			}
+			brows[nb].height = height;
+			brows[nb].split = split;
+			brows[nb].pool = pool_left;
+			brows[nb].in_owed = 0;
+			snprintf(brows[nb].finder, sizeof brows[nb].finder, "%s", finder);
+			nb++;
+		}
+		fclose(bf);
+	}
+	for (i = 0; i < nb; i++) {
+		size_t j;
+		for (j = 0; j < p->nowed; j++) {
+			if (memcmp(p->owed[j].hash, brows[i].hash, 32) == 0) {
+				brows[i].in_owed = 1;
+				break;
+			}
+		}
+	}
+	cur = out;
+	left = out_len;
+	w = snprintf(cur, left,
+		     "{\"schema_version\":1,\"updated_at\":%llu,\"blocks_found\":%llu,\"finds\":[",
+		     (unsigned long long)time(NULL), (unsigned long long)p->blocks_found);
+	if (w < 0 || (size_t)w >= left) {
+		pthread_mutex_unlock(&p->mu);
+		return -1;
+	}
+	cur += w;
+	left -= (size_t)w;
+	for (i = 0; i < p->nowed; i++) {
+		const char *finder = p->owed[i].finder;
+		size_t j;
+		if (!finder[0]) {
+			for (j = 0; j < nb; j++) {
+				if (memcmp(brows[j].hash, p->owed[i].hash, 32) == 0
+				    && brows[j].finder[0]) {
+					finder = brows[j].finder;
+					break;
+				}
+			}
+		}
+		if (finds_emit_row(&cur, &left, !first, p->owed[i].height, p->owed[i].hash,
+				   p->owed[i].at, p->owed[i].total, p->fee_bps, p->min_payout,
+				   p->owed[i].settled_at, finder, p->owed[i].ents,
+				   p->owed[i].amounts, p->owed[i].nent, 0, 0) != 0) {
+			pthread_mutex_unlock(&p->mu);
+			return -1;
+		}
+		first = 0;
+	}
+	for (i = 0; i < nb; i++) {
+		if (brows[i].in_owed) {
+			continue;
+		}
+		if (finds_emit_row(&cur, &left, !first, brows[i].height, brows[i].hash, 0,
+				   brows[i].split, p->fee_bps, p->min_payout, 0, brows[i].finder,
+				   NULL, NULL, 0, brows[i].pool, 1) != 0) {
+			pthread_mutex_unlock(&p->mu);
+			return -1;
+		}
+		first = 0;
+	}
+	if (left < 3) {
+		pthread_mutex_unlock(&p->mu);
+		return -1;
+	}
+	memcpy(cur, "]}", 3);
+	pthread_mutex_unlock(&p->mu);
+	return 0;
+}
+
 int prime_pool_dump(prime_pool *p, FILE *out)
 {
 	size_t i, idx;

@@ -308,7 +308,8 @@ static int build_pool_json(char *out, size_t out_len, const char *stats)
 			"\"stratum_v1\":\"stratum+tcp://%s:%u\","
 			"\"source\":\"%s\","
 			"\"shares\":\"/shares.json\","
-			"\"empty\":\"/empty.json\""
+			"\"empty\":\"/empty.json\","
+			"\"finds\":\"/finds.json\""
 			"}"
 			"}",
 			(unsigned long long)time(NULL), (unsigned)fee_bps,
@@ -351,6 +352,7 @@ static void *stats_thread(void *arg)
 		int want_pool = 0;
 		int want_shares = 0;
 		int want_empty = 0;
+		int want_finds = 0;
 		if (c < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -363,10 +365,27 @@ static void *stats_thread(void *arg)
 			want_shares = strstr(req, "GET /shares.json") || strstr(req, "GET /tides.json")
 				|| strstr(req, "GET /api/shares");
 			want_empty = strstr(req, "GET /empty.json") || strstr(req, "GET /api/empty");
-			want_json = !want_shares && !want_empty && (strstr(req, "GET /stats.json")
-				|| strstr(req, "GET /api"));
+			want_finds = strstr(req, "GET /finds.json") || strstr(req, "GET /api/finds");
+			want_json = !want_shares && !want_empty && !want_finds
+				&& (strstr(req, "GET /stats.json") || strstr(req, "GET /api"));
 			want_pool = strstr(req, "GET /pool.json") || strstr(req, "GET /api/pool")
 				|| strstr(req, "GET /datum_pool");
+		}
+		if (want_finds) {
+			char *finds = malloc(2097152);
+			if (!finds) {
+				send_json(c, "{\"schema_version\":1,\"available\":false}\n");
+				close(c);
+				continue;
+			}
+			if (prime_pool_finds_json(g_pool, finds, 2097152) != 0) {
+				snprintf(finds, 2097152,
+					 "{\"schema_version\":1,\"available\":false}\n");
+			}
+			send_json(c, finds);
+			free(finds);
+			close(c);
+			continue;
 		}
 		if (want_empty) {
 			char *empty = malloc(2097152);
@@ -434,7 +453,8 @@ static void *stats_thread(void *arg)
 				 "<p>pool_pubkey <code>%.64s...</code></p>"
 				 "<p><a href=\"/pool.json\">Pool JSON</a> · "
 				 "<a href=\"/shares.json\">Share log</a> · "
-				 "<a href=\"/empty.json\">Empty finds</a></p>"
+				 "<a href=\"/empty.json\">Empty finds</a> · "
+				 "<a href=\"/finds.json\">Found blocks</a></p>"
 				 "<pre>%s</pre>"
 				 "<p>Source: <a href=\"http://pool.blockvase.com:28916/\">AGPL</a> "
 				 "translated from RATUM Prime by iohzrd</p>"

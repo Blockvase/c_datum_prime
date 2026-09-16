@@ -104,7 +104,9 @@ the internal `--stratum-listen` port. Miner rows include `kind` (`datum`,
 hashrate. `GET /empty.json` (also `/api/empty`) is the frozen window for those
 subsidy-only finds: block hash (ledger and explorer order), fee, miners,
 and the same split amounts a later `sendmany` would pay. `links.empty`
-points at it. `status.empty_finds` / `status.empty_unsettled` count subsidy-only
+points at it. `GET /finds.json` (also `/api/finds`) is the same shape for
+ordinary split finds from `ledger.owed` plus any `ledger.blocks` row whose
+hash is not already there. `links.finds` points at it. `status.empty_finds` / `status.empty_unsettled` count subsidy-only
 pool blocks whose coinbase paid the pool script. Prime copies the window
 just before `submitblock`, then writes `ledger.empty` only if the node
 returns null or duplicate. A normal split find waits the same way before

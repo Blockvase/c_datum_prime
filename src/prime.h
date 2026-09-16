@@ -445,6 +445,7 @@ int prime_pool_abort_empty(prime_pool *p, const unsigned char hash[32]);
 int prime_pool_list_empty(prime_pool *p, FILE *out);
 int prime_pool_empty_sendmany(prime_pool *p, const unsigned char hash[32], FILE *out);
 int prime_pool_empty_json(prime_pool *p, char *out, size_t out_len);
+int prime_pool_finds_json(prime_pool *p, char *out, size_t out_len);
 int prime_pool_settle_empty(prime_pool *p, const unsigned char hash[32], uint64_t at);
 int prime_pool_void_empty(prime_pool *p, const unsigned char hash[32]);
 size_t prime_pool_empty_count(prime_pool *p);
