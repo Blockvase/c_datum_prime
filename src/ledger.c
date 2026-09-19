@@ -79,9 +79,14 @@ struct prime_pool {
 		uint64_t total;
 		uint64_t settled_at;
 		char finder[PRIME_MAX_IDENTITY];
+		uint64_t total_work;
+		uint16_t fee_bps;
+		uint64_t min_payout;
 		size_t nent;
 		char ents[PRIME_MAX_OWED_ENTS][PRIME_MAX_IDENTITY];
 		uint64_t amounts[PRIME_MAX_OWED_ENTS];
+		uint64_t work[PRIME_MAX_OWED_ENTS];
+		uint64_t public_work[PRIME_MAX_OWED_ENTS];
 	} owed[PRIME_MAX_OWED];
 	size_t nempty;
 	struct {
@@ -354,13 +359,22 @@ static void load_owed(prime_pool *p)
 		return;
 	}
 	while (fgets(line, sizeof line, f) && p->nowed < PRIME_MAX_OWED) {
-		char hex[65];
+		char hex[65], finder[PRIME_MAX_IDENTITY];
 		unsigned long height, nent;
-		unsigned long long at, total, settled;
-		if (sscanf(line, "%64s %lu %llu %llu %llu %lu", hex, &height, &at, &total, &settled,
-			   &nent) != 6) {
+		unsigned long long at, total, settled, total_work = 0, minp = 0;
+		unsigned fee = 0;
+		int nfield;
+		if (line[0] == ' ') {
 			continue;
 		}
+		finder[0] = 0;
+		nfield = sscanf(line, "%64s %lu %llu %llu %llu %lu %llu %u %llu %127s", hex,
+				&height, &at, &total, &settled, &nent, &total_work, &fee, &minp,
+				finder);
+		if (nfield < 6) {
+			continue;
+		}
+		memset(&p->owed[p->nowed], 0, sizeof p->owed[p->nowed]);
 		if (prime_hex_decode(hex, p->owed[p->nowed].hash, 32) != 0) {
 			continue;
 		}
@@ -368,18 +382,32 @@ static void load_owed(prime_pool *p)
 		p->owed[p->nowed].at = at;
 		p->owed[p->nowed].total = total;
 		p->owed[p->nowed].settled_at = settled;
+		p->owed[p->nowed].total_work = nfield >= 7 ? total_work : 0;
+		p->owed[p->nowed].fee_bps = nfield >= 8 ? (uint16_t)fee : 0;
+		p->owed[p->nowed].min_payout = nfield >= 9 ? minp : 0;
+		if (nfield >= 10 && finder[0] && strcmp(finder, "-") != 0) {
+			snprintf(p->owed[p->nowed].finder, sizeof p->owed[p->nowed].finder, "%s",
+				 finder);
+		}
 		p->owed[p->nowed].nent = 0;
 		while (p->owed[p->nowed].nent < nent
 		       && p->owed[p->nowed].nent < PRIME_MAX_OWED_ENTS
 		       && fgets(line, sizeof line, f)) {
 			char ident[PRIME_MAX_IDENTITY];
-			unsigned long long sats;
-			if (sscanf(line, " %127s %llu", ident, &sats) != 2) {
+			unsigned long long sats = 0, work = 0, pub = 0;
+			int nf;
+			if (line[0] != ' ') {
+				break;
+			}
+			nf = sscanf(line, " %127s %llu %llu %llu", ident, &sats, &work, &pub);
+			if (nf < 2) {
 				break;
 			}
 			snprintf(p->owed[p->nowed].ents[p->owed[p->nowed].nent],
 				 PRIME_MAX_IDENTITY, "%s", ident);
 			p->owed[p->nowed].amounts[p->owed[p->nowed].nent] = sats;
+			p->owed[p->nowed].work[p->owed[p->nowed].nent] = nf >= 3 ? work : 0;
+			p->owed[p->nowed].public_work[p->owed[p->nowed].nent] = nf >= 4 ? pub : 0;
 			p->owed[p->nowed].nent++;
 		}
 		p->nowed++;
@@ -400,12 +428,18 @@ static void save_owed(prime_pool *p)
 	for (i = 0; i < p->nowed; i++) {
 		char hex[65];
 		prime_hex_encode(p->owed[i].hash, 32, hex, sizeof hex);
-		fprintf(f, "%s %u %llu %llu %llu %zu\n", hex, p->owed[i].height,
+		fprintf(f, "%s %u %llu %llu %llu %zu %llu %u %llu %s\n", hex, p->owed[i].height,
 			(unsigned long long)p->owed[i].at, (unsigned long long)p->owed[i].total,
-			(unsigned long long)p->owed[i].settled_at, p->owed[i].nent);
+			(unsigned long long)p->owed[i].settled_at, p->owed[i].nent,
+			(unsigned long long)p->owed[i].total_work, (unsigned)p->owed[i].fee_bps,
+			(unsigned long long)(p->owed[i].min_payout ? p->owed[i].min_payout
+								  : p->min_payout),
+			p->owed[i].finder[0] ? p->owed[i].finder : "-");
 		for (j = 0; j < p->owed[i].nent; j++) {
-			fprintf(f, " %s %llu\n", p->owed[i].ents[j],
-				(unsigned long long)p->owed[i].amounts[j]);
+			fprintf(f, " %s %llu %llu %llu\n", p->owed[i].ents[j],
+				(unsigned long long)p->owed[i].amounts[j],
+				(unsigned long long)p->owed[i].work[j],
+				(unsigned long long)p->owed[i].public_work[j]);
 		}
 	}
 	fclose(f);
@@ -572,6 +606,126 @@ static void load_blocks(prime_pool *p)
 	fclose(f);
 }
 
+static int owed_window_missing(const prime_pool *p, size_t i)
+{
+	size_t j;
+	if (p->owed[i].total_work) {
+		return 0;
+	}
+	for (j = 0; j < p->owed[i].nent; j++) {
+		if (p->owed[i].work[j] || p->owed[i].public_work[j]) {
+			return 0;
+		}
+	}
+	return p->owed[i].nent > 0;
+}
+
+static void owed_add_share(prime_pool *p, size_t i, const prime_share_row *s)
+{
+	size_t j;
+	int is_pub = share_tag_is_sv1(s->tag);
+
+	for (j = 0; j < p->owed[i].nent; j++) {
+		if (strcmp(p->owed[i].ents[j], s->identity) == 0) {
+			p->owed[i].work[j] += s->difficulty;
+			if (is_pub) {
+				p->owed[i].public_work[j] += s->difficulty;
+			}
+			p->owed[i].total_work += s->difficulty;
+			return;
+		}
+	}
+	if (p->owed[i].nent >= PRIME_MAX_OWED_ENTS) {
+		p->owed[i].total_work += s->difficulty;
+		return;
+	}
+	j = p->owed[i].nent++;
+	snprintf(p->owed[i].ents[j], PRIME_MAX_IDENTITY, "%s", s->identity);
+	p->owed[i].amounts[j] = 0;
+	p->owed[i].work[j] = s->difficulty;
+	p->owed[i].public_work[j] = is_pub ? s->difficulty : 0;
+	p->owed[i].total_work += s->difficulty;
+}
+
+static void owed_backfill_from_shares(prime_pool *p)
+{
+	FILE *f;
+	char path[600];
+	prime_share_row s;
+	int fill[PRIME_MAX_OWED];
+	size_t i;
+	int any = 0, dirty = 0;
+
+	if (!p) {
+		return;
+	}
+	for (i = 0; i < p->nowed; i++) {
+		fill[i] = owed_window_missing(p, i);
+		any |= fill[i];
+	}
+	if (!any) {
+		return;
+	}
+	snprintf(path, sizeof path, "%s.shares", p->path);
+	f = fopen(path, "rb");
+	if (!f) {
+		return;
+	}
+	while (fread(&s, sizeof s, 1, f) == 1) {
+		if (!s.at || !s.difficulty) {
+			continue;
+		}
+		for (i = 0; i < p->nowed; i++) {
+			if (fill[i] && s.at <= p->owed[i].at) {
+				owed_add_share(p, i, &s);
+				dirty = 1;
+			}
+		}
+	}
+	fclose(f);
+	if (!dirty) {
+		return;
+	}
+	for (i = 0; i < p->nowed; i++) {
+		if (!fill[i]) {
+			continue;
+		}
+		if (!p->owed[i].min_payout) {
+			p->owed[i].min_payout = p->min_payout;
+		}
+	}
+	{
+		FILE *bf;
+		char bpath[600], line[512];
+		snprintf(bpath, sizeof bpath, "%s.blocks", p->path);
+		bf = fopen(bpath, "r");
+		if (bf) {
+			while (fgets(line, sizeof line, bf)) {
+				unsigned height = 0;
+				char hex[65], finder[PRIME_MAX_IDENTITY];
+				unsigned char hash[32];
+				if (sscanf(line, "%u %64s %127s", &height, hex, finder) != 3) {
+					continue;
+				}
+				if (prime_hex_decode(hex, hash, 32) != 0) {
+					continue;
+				}
+				for (i = 0; i < p->nowed; i++) {
+					if (fill[i] && !p->owed[i].finder[0]
+					    && memcmp(p->owed[i].hash, hash, 32) == 0) {
+						snprintf(p->owed[i].finder, sizeof p->owed[i].finder,
+							 "%s", finder);
+					}
+				}
+			}
+			fclose(bf);
+		}
+	}
+	save_owed(p);
+	fprintf(stderr, "prime: reconstructed window work for %zu owed find(s) from the share file\n",
+		p->nowed);
+}
+
 static void apply_fee_after_first(prime_pool *p)
 {
 	if (!p->fee_after_first_bps) {
@@ -594,8 +748,10 @@ static void print_owed_row(FILE *out, const prime_pool *p, size_t i)
 	}
 	fputc('\n', out);
 	for (j = 0; j < p->owed[i].nent; j++) {
-		fprintf(out, "  %s %llu\n", p->owed[i].ents[j],
-			(unsigned long long)p->owed[i].amounts[j]);
+		fprintf(out, "  %s %llu work %llu pub %llu\n", p->owed[i].ents[j],
+			(unsigned long long)p->owed[i].amounts[j],
+			(unsigned long long)p->owed[i].work[j],
+			(unsigned long long)p->owed[i].public_work[j]);
 	}
 }
 
@@ -623,6 +779,40 @@ prime_pool *prime_pool_open(const char *path, uint64_t window, uint64_t min_payo
 	load_owed(p);
 	load_empty(p);
 	load_blocks(p);
+	owed_backfill_from_shares(p);
+	{
+		FILE *bf;
+		char bpath[600], line[512];
+		int filled = 0;
+		snprintf(bpath, sizeof bpath, "%s.blocks", p->path);
+		bf = fopen(bpath, "r");
+		if (bf) {
+			while (fgets(line, sizeof line, bf)) {
+				unsigned height = 0;
+				char hex[65], finder[PRIME_MAX_IDENTITY];
+				unsigned char hash[32];
+				size_t i;
+				if (sscanf(line, "%u %64s %127s", &height, hex, finder) != 3) {
+					continue;
+				}
+				if (prime_hex_decode(hex, hash, 32) != 0) {
+					continue;
+				}
+				for (i = 0; i < p->nowed; i++) {
+					if (!p->owed[i].finder[0]
+					    && memcmp(p->owed[i].hash, hash, 32) == 0) {
+						snprintf(p->owed[i].finder, sizeof p->owed[i].finder,
+							 "%s", finder);
+						filled = 1;
+					}
+				}
+			}
+			fclose(bf);
+		}
+		if (filled) {
+			save_owed(p);
+		}
+	}
 	apply_fee_after_first(p);
 	fprintf(stderr, "prime: ledger %s shares=%zu work=%llu window=%llu%s blocks=%llu owed=%zu empty=%zu\n",
 		p->path, p->nshares, (unsigned long long)p->total_work,
@@ -1248,14 +1438,45 @@ int prime_pool_record_owed(prime_pool *p, uint32_t height, const unsigned char h
 	p->owed[slot].height = height;
 	memcpy(p->owed[slot].hash, hash, 32);
 	p->owed[slot].total = total;
+	p->owed[slot].total_work = p->total_work;
+	p->owed[slot].fee_bps = p->fee_bps;
+	p->owed[slot].min_payout = p->min_payout;
 	snprintf(p->owed[slot].finder, sizeof p->owed[slot].finder, "%s", finder ? finder : "");
 	if (n > PRIME_MAX_OWED_ENTS) {
 		n = PRIME_MAX_OWED_ENTS;
 	}
 	p->owed[slot].nent = n;
 	for (i = 0; i < n; i++) {
+		size_t k;
 		snprintf(p->owed[slot].ents[i], PRIME_MAX_IDENTITY, "%s", idents[i]);
 		p->owed[slot].amounts[i] = amounts[i];
+		for (k = 0; k < p->nidents; k++) {
+			if (strcmp(p->idents[k].identity, idents[i]) == 0) {
+				p->owed[slot].work[i] = p->idents[k].work;
+				p->owed[slot].public_work[i] = p->idents[k].public_work;
+				break;
+			}
+		}
+	}
+	for (i = 0; i < p->nidents && p->owed[slot].nent < PRIME_MAX_OWED_ENTS; i++) {
+		size_t k, have = 0;
+		if (!p->idents[i].work) {
+			continue;
+		}
+		for (k = 0; k < p->owed[slot].nent; k++) {
+			if (strcmp(p->owed[slot].ents[k], p->idents[i].identity) == 0) {
+				have = 1;
+				break;
+			}
+		}
+		if (have) {
+			continue;
+		}
+		k = p->owed[slot].nent++;
+		snprintf(p->owed[slot].ents[k], PRIME_MAX_IDENTITY, "%s", p->idents[i].identity);
+		p->owed[slot].amounts[k] = 0;
+		p->owed[slot].work[k] = p->idents[i].work;
+		p->owed[slot].public_work[k] = p->idents[i].public_work;
 	}
 	save_owed(p);
 	pthread_mutex_unlock(&p->mu);
@@ -2003,8 +2224,9 @@ static int finds_emit_row(char **cur, size_t *left, int comma, uint32_t height,
 			  const unsigned char hash[32], uint64_t found_at, uint64_t value,
 			  uint16_t fee_bps, uint64_t min_payout, uint64_t settled_at,
 			  const char *finder, const char ents[][PRIME_MAX_IDENTITY],
-			  const uint64_t *amounts, size_t nent, uint64_t leftover_sats,
-			  int leftover_fixed)
+			  const uint64_t *amounts, const uint64_t *work,
+			  const uint64_t *public_work, uint64_t total_work, size_t nent,
+			  uint64_t leftover_sats, int leftover_fixed)
 {
 	char hex[65], block[65];
 	unsigned char rev[32];
@@ -2038,7 +2260,21 @@ static int finds_emit_row(char **cur, size_t *left, int comma, uint32_t height,
 	*cur += w;
 	*left -= (size_t)w;
 	for (j = 0; j < nent; j++) {
-		double pct = value ? ((double)amounts[j] * 100.0 / (double)value) : 0.0;
+		uint64_t row_w = work ? work[j] : 0;
+		uint64_t pub_w = public_work ? public_work[j] : 0;
+		uint64_t dat_w = row_w > pub_w ? row_w - pub_w : 0;
+		const char *kind = pub_w == 0 ? "datum" : (dat_w == 0 ? "sv1" : "mixed");
+		double pct = 0.0;
+		if (total_work && row_w) {
+			pct = (double)row_w * 100.0 / (double)total_work;
+		} else if (value && amounts) {
+			pct = (double)amounts[j] * 100.0 / (double)value;
+		}
+		if (pub_w > row_w) {
+			pub_w = row_w;
+			dat_w = 0;
+			kind = "sv1";
+		}
 		w = snprintf(*cur, *left, "%s{\"id\":\"", first_m ? "" : ",");
 		if (w < 0 || (size_t)w >= *left) {
 			return -1;
@@ -2047,9 +2283,10 @@ static int finds_emit_row(char **cur, size_t *left, int comma, uint32_t height,
 		*left -= (size_t)w;
 		json_escape_append(cur, left, ents[j]);
 		w = snprintf(*cur, *left,
-			     "\",\"work\":0,\"datum_work\":0,\"public_work\":0,"
-			     "\"kind\":\"datum\",\"window_percent\":%.6f}",
-			     pct);
+			     "\",\"work\":%llu,\"datum_work\":%llu,\"public_work\":%llu,"
+			     "\"kind\":\"%s\",\"window_percent\":%.6f}",
+			     (unsigned long long)row_w, (unsigned long long)dat_w,
+			     (unsigned long long)pub_w, kind, pct);
 		if (w < 0 || (size_t)w >= *left) {
 			return -1;
 		}
@@ -2198,9 +2435,12 @@ int prime_pool_finds_json(prime_pool *p, char *out, size_t out_len)
 			}
 		}
 		if (finds_emit_row(&cur, &left, !first, p->owed[i].height, p->owed[i].hash,
-				   p->owed[i].at, p->owed[i].total, p->fee_bps, p->min_payout,
+				   p->owed[i].at, p->owed[i].total,
+				   p->owed[i].fee_bps, p->owed[i].min_payout ? p->owed[i].min_payout
+									     : p->min_payout,
 				   p->owed[i].settled_at, finder, p->owed[i].ents,
-				   p->owed[i].amounts, p->owed[i].nent, 0, 0) != 0) {
+				   p->owed[i].amounts, p->owed[i].work, p->owed[i].public_work,
+				   p->owed[i].total_work, p->owed[i].nent, 0, 0) != 0) {
 			pthread_mutex_unlock(&p->mu);
 			return -1;
 		}
@@ -2212,7 +2452,7 @@ int prime_pool_finds_json(prime_pool *p, char *out, size_t out_len)
 		}
 		if (finds_emit_row(&cur, &left, !first, brows[i].height, brows[i].hash, 0,
 				   brows[i].split, p->fee_bps, p->min_payout, 0, brows[i].finder,
-				   NULL, NULL, 0, brows[i].pool, 1) != 0) {
+				   NULL, NULL, NULL, NULL, 0, 0, brows[i].pool, 1) != 0) {
 			pthread_mutex_unlock(&p->mu);
 			return -1;
 		}

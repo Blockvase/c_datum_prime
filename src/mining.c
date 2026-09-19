@@ -172,11 +172,11 @@ static void credit_accepted_split(prime_pool *pool, uint32_t height,
 	for (k = 0; k < n; k++) {
 		paid += amounts[k];
 	}
-	prime_pool_record_block(pool, height, hash, finder, paid,
-				value > paid ? value - paid : 0);
 	if (n) {
 		prime_pool_record_owed(pool, height, hash, finder, paid, idents, amounts, n);
 	}
+	prime_pool_record_block(pool, height, hash, finder, paid,
+				value > paid ? value - paid : 0);
 }
 
 void prime_conn_mining_free(prime_conn_mining *m)

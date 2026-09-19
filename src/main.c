@@ -16,12 +16,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <netinet/tcp.h>
+#endif
 
 static volatile sig_atomic_t g_stop = 0;
+
+/* Per-client I/O bounds: dead peers must not spin handler threads forever. */
+#define PRIME_CLIENT_IO_SEC 2
+#define PRIME_CLIENT_MAX_IDLE_POLLS 90 /* 90 * 2s = 3 minutes without inbound data */
 
 /* data/ next to the project root (parent of build/), not the cwd or a hardcoded home path. */
 static void tree_data_dir(char *out, size_t out_len)
@@ -94,6 +102,65 @@ static int read_exact(int fd, unsigned char *buf, size_t n)
 		off += (size_t)r;
 	}
 	return 0;
+}
+
+static void prime_tune_client_socket(int fd)
+{
+	struct timeval tv;
+	int on = 1;
+
+	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on);
+#ifdef __linux__
+	{
+		int idle = 60, intvl = 10, cnt = 3;
+		setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+		setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+		setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+	}
+#ifdef TCP_USER_TIMEOUT
+	{
+		unsigned user_timeout_ms = 60000;
+		setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms,
+			   sizeof user_timeout_ms);
+	}
+#endif
+#endif
+	tv.tv_sec = PRIME_CLIENT_IO_SEC;
+	tv.tv_usec = 0;
+	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
+/* 1 readable, 0 timeout, -1 error/hangup (errno set when applicable). */
+static int prime_poll_readable(int fd, int timeout_ms)
+{
+	struct pollfd p;
+
+	while (!g_stop) {
+		int r;
+
+		p.fd = fd;
+		p.events = POLLIN;
+		r = poll(&p, 1, timeout_ms);
+		if (r < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -1;
+		}
+		if (r == 0) {
+			return 0;
+		}
+		if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+			errno = ECONNRESET;
+			return -1;
+		}
+		if (p.revents & POLLIN) {
+			return 1;
+		}
+	}
+	errno = EINTR;
+	return -1;
 }
 
 static int parse_listen(const char *s, char *host, size_t host_len, uint16_t *port)
@@ -271,103 +338,120 @@ static void handle_client(int fd, const struct sockaddr_in *peer, const prime_ke
 	}
 
 	{
-		struct timeval tv;
-		tv.tv_sec = 2;
-		tv.tv_usec = 0;
-		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-	}
+		unsigned idle_polls = 0;
 
-	while (!g_stop) {
-		unsigned char *plain = NULL;
-		size_t plain_len = 0;
-		if (read_exact(fd, hdr_bytes, 4) != 0) {
-			/* Timeout only: SO_RCVTIMEO so g_stop can be noticed.
-			 * read_exact already retries EINTR. EOF is ECONNRESET. */
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		while (!g_stop) {
+			unsigned char *plain = NULL;
+			size_t plain_len = 0;
+			int pr;
+
+			pr = prime_poll_readable(fd, PRIME_CLIENT_IO_SEC * 1000);
+			if (pr < 0) {
+				fprintf(stderr, "[%s] disconnected (poll)\n", peer_s);
+				break;
+			}
+			if (pr == 0) {
+				idle_polls++;
+				if (idle_polls >= PRIME_CLIENT_MAX_IDLE_POLLS) {
+					fprintf(stderr, "[%s] idle timeout\n", peer_s);
+					break;
+				}
 				continue;
 			}
-			fprintf(stderr, "[%s] disconnected\n", peer_s);
-			break;
-		}
-		prime_ratchet_unmask(&session.rx_headers, hdr_bytes, &header);
-		if (header.cmd_len > PRIME_MAX_CMD_LEN) {
-			fprintf(stderr, "[%s] frame too large\n", peer_s);
-			break;
-		}
-		payload = malloc(header.cmd_len ? header.cmd_len : 1);
-		if (!payload || (header.cmd_len && read_exact(fd, payload, header.cmd_len) != 0)) {
-			fprintf(stderr, "[%s] frame body failed\n", peer_s);
-			free(payload);
-			break;
-		}
-		if (header.is_encrypted_channel) {
-			if (prime_session_decrypt(&session, &header, payload, header.cmd_len, &plain, &plain_len) != 0) {
-				fprintf(stderr, "[%s] decrypt failed cmd=%u len=%u\n",
-					peer_s, header.proto_cmd, header.cmd_len);
+			idle_polls = 0;
+			if (read_exact(fd, hdr_bytes, 4) != 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					idle_polls++;
+					if (idle_polls >= PRIME_CLIENT_MAX_IDLE_POLLS) {
+						fprintf(stderr, "[%s] idle timeout\n", peer_s);
+						break;
+					}
+					continue;
+				}
+				fprintf(stderr, "[%s] disconnected\n", peer_s);
+				break;
+			}
+			prime_ratchet_unmask(&session.rx_headers, hdr_bytes, &header);
+			if (header.cmd_len > PRIME_MAX_CMD_LEN) {
+				fprintf(stderr, "[%s] frame too large\n", peer_s);
+				break;
+			}
+			payload = malloc(header.cmd_len ? header.cmd_len : 1);
+			if (!payload || (header.cmd_len && read_exact(fd, payload, header.cmd_len) != 0)) {
+				fprintf(stderr, "[%s] frame body failed\n", peer_s);
 				free(payload);
 				break;
 			}
-			if (header.proto_cmd == PRIME_CMD_BULK) {
-				int done = 0;
-				unsigned char ack[12], *aw = NULL;
-				size_t awl = 0;
-				if (prime_bulk_ingest(&bulk, &bulk_len, &bulk_cap, &bid, &btot, &bgot,
-						      plain, plain_len, &done) == 0) {
-					prime_bulk_ack(bid, bgot, ack);
-					if (prime_session_encrypt(&session, PRIME_CMD_BULK, ack, 12,
-								  false, &aw, &awl) == 0 && aw) {
-						write_all(fd, aw, awl);
-						free(aw);
-					}
-					if (done && bulk) {
-						unsigned char *reply = NULL;
-						size_t reply_len = 0;
-						prime_handle_mining(&session, &mining, opt, bulk,
-								    bulk_len, &reply, &reply_len,
-								    peer_s);
-						if (reply) {
-							write_all(fd, reply, reply_len);
-							free(reply);
+			if (header.is_encrypted_channel) {
+				if (prime_session_decrypt(&session, &header, payload, header.cmd_len, &plain, &plain_len) != 0) {
+					fprintf(stderr, "[%s] decrypt failed cmd=%u len=%u\n",
+						peer_s, header.proto_cmd, header.cmd_len);
+					free(payload);
+					break;
+				}
+				if (header.proto_cmd == PRIME_CMD_BULK) {
+					int done = 0;
+					unsigned char ack[12], *aw = NULL;
+					size_t awl = 0;
+					if (prime_bulk_ingest(&bulk, &bulk_len, &bulk_cap, &bid, &btot, &bgot,
+							      plain, plain_len, &done) == 0) {
+						prime_bulk_ack(bid, bgot, ack);
+						if (prime_session_encrypt(&session, PRIME_CMD_BULK, ack, 12,
+									  false, &aw, &awl) == 0 && aw) {
+							write_all(fd, aw, awl);
+							free(aw);
 						}
-						free(bulk);
-						bulk = NULL;
-						bulk_len = bulk_cap = 0;
-						bid = btot = bgot = 0;
+						if (done && bulk) {
+							unsigned char *reply = NULL;
+							size_t reply_len = 0;
+							prime_handle_mining(&session, &mining, opt, bulk,
+									    bulk_len, &reply, &reply_len,
+									    peer_s);
+							if (reply) {
+								write_all(fd, reply, reply_len);
+								free(reply);
+							}
+							free(bulk);
+							bulk = NULL;
+							bulk_len = bulk_cap = 0;
+							bid = btot = bgot = 0;
+						}
 					}
-				}
-			} else if (header.proto_cmd == PRIME_CMD_MINING) {
-				unsigned char *reply = NULL;
-				size_t reply_len = 0;
-				if (!logged_first_mining && plain_len) {
-					logged_first_mining = 1;
-					fprintf(stderr, "[%s] first mining frame sub=%02x len=%zu\n",
-						peer_s, plain[0], plain_len);
-				}
-				if (prime_handle_mining(&session, &mining, opt, plain, plain_len,
-							&reply, &reply_len, peer_s) != 0) {
-					fprintf(stderr, "[%s] mining handler failed\n", peer_s);
-				} else if (reply) {
-					if (write_all(fd, reply, reply_len) != 0) {
-						fprintf(stderr, "[%s] mining reply write failed\n", peer_s);
+				} else if (header.proto_cmd == PRIME_CMD_MINING) {
+					unsigned char *reply = NULL;
+					size_t reply_len = 0;
+					if (!logged_first_mining && plain_len) {
+						logged_first_mining = 1;
+						fprintf(stderr, "[%s] first mining frame sub=%02x len=%zu\n",
+							peer_s, plain[0], plain_len);
+					}
+					if (prime_handle_mining(&session, &mining, opt, plain, plain_len,
+								&reply, &reply_len, peer_s) != 0) {
+						fprintf(stderr, "[%s] mining handler failed\n", peer_s);
+					} else if (reply) {
+						if (write_all(fd, reply, reply_len) != 0) {
+							fprintf(stderr, "[%s] mining reply write failed\n", peer_s);
+							free(reply);
+							free(plain);
+							free(payload);
+							break;
+						}
 						free(reply);
-						free(plain);
-						free(payload);
-						break;
 					}
-					free(reply);
+				} else {
+					fprintf(stderr, "[%s] frame cmd=%u sub=%02x len=%zu\n",
+						peer_s, header.proto_cmd, plain_len ? plain[0] : 0, plain_len);
 				}
+				free(plain);
 			} else {
-				fprintf(stderr, "[%s] frame cmd=%u sub=%02x len=%zu\n",
-					peer_s, header.proto_cmd, plain_len ? plain[0] : 0, plain_len);
+				fprintf(stderr, "[%s] unencrypted frame cmd=%u len=%u\n",
+					peer_s, header.proto_cmd, header.cmd_len);
 			}
-			free(plain);
-		} else {
-			fprintf(stderr, "[%s] unencrypted frame cmd=%u len=%u\n",
-				peer_s, header.proto_cmd, header.cmd_len);
+			free(payload);
+			payload = NULL;
 		}
-		free(payload);
-		payload = NULL;
 	}
+
 	if (opt->pool && hello.generation == PRIME_GEN_V3) {
 		prime_pool_resume_put(opt->pool, token, hello.client_sign_pk,
 				      mining.next_coinbaser_id, mining.abw_on ? &mining.abw : NULL);
@@ -434,6 +518,8 @@ static void spawn_client(int fd, const struct sockaddr_in *peer, const prime_key
 {
 	pthread_t th;
 	prime_client_arg *arg = malloc(sizeof *arg);
+
+	prime_tune_client_socket(fd);
 	if (!arg) {
 		close(fd);
 		return;
